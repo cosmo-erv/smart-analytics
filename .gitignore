@@ -1,0 +1,25 @@
+# Secrets and local credentials
+.env
+.garmin_tokens/
+*.session
+
+# Local data cache — your Garmin data never leaves your machine
+data/
+!data/.gitkeep
+
+# Python
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+.ruff_cache/
+
+# Streamlit
+.streamlit/secrets.toml
+
+# OS
+.DS_Store
