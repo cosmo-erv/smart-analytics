@@ -133,6 +133,9 @@ class GarminClient:
         # is waiting on a code.
         self._pending_mfa_state: Any = None
         self._mfa_pending = False
+        # What became of the browser sign-in attempt, surfaced when a code
+        # never arrives — a silent fallback is the likeliest explanation.
+        self._web_flow_note: str | None = None
         # Address used for an interactive login, so the UI can name the account
         # even when nothing was configured in .env.
         self._login_email: str = ""
@@ -225,7 +228,7 @@ class GarminClient:
             self._pending_mfa_state = client_state
             self._mfa_pending = True
             return {"status": "mfa_required", "method": self.mfa_method(),
-                    "flow": self.mfa_flow()}
+                    "flow": self.mfa_flow(), "web_flow": self.web_flow_note()}
 
         self._pending_mfa_state = None
         self._mfa_pending = False
@@ -248,25 +251,38 @@ class GarminClient:
         """
         try:
             from garminconnect.client import _MFARequired
-        except Exception:  # noqa: BLE001 — private, and absent in other versions
+        except Exception as exc:  # noqa: BLE001 — private, absent in other versions
+            self._web_flow_note = f"not attempted — {type(exc).__name__}: {exc}"
             return _FALL_BACK, None
 
         web_login = getattr(getattr(api, "client", None), "_widget_web_login", None)
         if web_login is None:
+            self._web_flow_note = ("not attempted — this garminconnect version has no "
+                                   "browser sign-in flow")
             return _FALL_BACK, None
 
         from garminconnect import GarminConnectAuthenticationError
         try:
             web_login(email, password)
         except _MFARequired:
-            log.info("Garmin web sign-in raised an MFA challenge (code dispatched)")
+            self._web_flow_note = "used — Garmin raised the challenge over the browser form"
+            log.info("Garmin web sign-in raised an MFA challenge")
             return "needs_mfa", None
         except GarminConnectAuthenticationError:
             raise
         except Exception as exc:  # noqa: BLE001 — rate limit, WAF, missing curl_cffi
-            log.info("Garmin web sign-in unusable (%s); trying the default chain", exc)
+            # Worth surfacing rather than only logging: falling back lands on the
+            # mobile flow, and if that's the one that doesn't dispatch a code then
+            # this line is the whole explanation for a code that never arrives.
+            self._web_flow_note = f"fell back — {type(exc).__name__}: {exc}"
+            log.warning("Garmin web sign-in unusable (%s); trying the default chain", exc)
             return _FALL_BACK, None
+        self._web_flow_note = "used — signed in with no challenge"
         return None, None
+
+    def web_flow_note(self) -> str | None:
+        """What happened to the browser sign-in attempt, for the no-code diagnostics."""
+        return self._web_flow_note
 
     def mfa_flow(self) -> str | None:
         """Which login flow raised the challenge — useful when a code never lands."""

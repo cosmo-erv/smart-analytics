@@ -23,6 +23,7 @@ from ..state import (
     garmin_mfa_flow,
     garmin_mfa_method,
     garmin_sign_out,
+    garmin_web_flow_note,
     palette,
     run_sync,
 )
@@ -102,9 +103,14 @@ def _no_code_help() -> None:
             "working with MFA re-enabled — so this is a one-time step, not a permanent "
             "downgrade of your account security."
         )
-        flow = garmin_mfa_flow()
-        if flow:
-            st.caption(f"Diagnostic — Garmin raised the challenge over its `{flow}` flow.")
+        flow, web_flow = garmin_mfa_flow(), garmin_web_flow_note()
+        if flow or web_flow:
+            lines = []
+            if web_flow:
+                lines.append(f"- Browser sign-in: {web_flow}")
+            if flow:
+                lines.append(f"- Challenge raised over Garmin's `{flow}` flow")
+            st.caption("**Diagnostics**\n" + "\n".join(lines))
 
 
 def _garmin_account(colors) -> None:

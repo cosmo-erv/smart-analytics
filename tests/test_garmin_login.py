@@ -185,6 +185,22 @@ def test_bad_credentials_from_the_web_flow_are_not_retried(client, monkeypatch):
     assert recorder.calls == 1
 
 
+@pytest.mark.parametrize("outcome, expected", [
+    ("mfa", "used —"),
+    ("unusable", "fell back — RuntimeError: curl_cffi not available"),
+])
+def test_the_web_flow_outcome_is_reported(client, monkeypatch, outcome, expected):
+    """A silent fallback is the likeliest reason a code never arrives.
+
+    The mobile flow it falls back to reports the challenge without Garmin
+    dispatching anything, so this note is the difference between diagnosing that
+    and guessing at it.
+    """
+    _install_web_flow(client, monkeypatch, outcome)
+    result = client.begin_login("athlete@example.com", MFA_PASSWORD)
+    assert result["web_flow"].startswith(expected)
+
+
 def test_the_web_flow_can_be_turned_off(client, monkeypatch):
     recorder = _install_web_flow(client, monkeypatch, "mfa")
     result = client.begin_login("athlete@example.com", MFA_PASSWORD,
