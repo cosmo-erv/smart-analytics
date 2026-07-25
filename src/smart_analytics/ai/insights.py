@@ -1,11 +1,15 @@
 """The AI coaching layer.
 
-Design rule: **Claude never sees raw activity data and never computes numbers.**
-The deterministic engines in ``analytics/`` do all the arithmetic and hand over a
-compact briefing (:meth:`TrainingReport.briefing`); Claude's job is to interpret
-it — rank what matters, explain the mechanism, and turn findings into a plan.
-That keeps the numbers reproducible and auditable, and stops the model from
-inventing statistics.
+Design rule: **the model never sees raw activity data and never computes
+numbers.** The deterministic engines in ``analytics/`` do all the arithmetic and
+hand over a compact briefing (:meth:`TrainingReport.briefing`); the model's job is
+to interpret it — rank what matters, explain the mechanism, and turn findings into
+a plan. That keeps the numbers reproducible and auditable, and stops the model
+from inventing statistics.
+
+Either Anthropic or OpenAI can serve it, chosen by whichever key is configured
+(``AI_PROVIDER`` forces one). The prompts, schema and briefing are shared; only
+the transport differs — see :mod:`.openai_backend`.
 
 Two entry points:
 
@@ -140,7 +144,7 @@ class CoachReport:
     four_week_plan: list[dict[str, Any]] = field(default_factory=list)
     data_gaps: list[str] = field(default_factory=list)
     model: str = ""
-    source: str = "claude"  # claude | rules
+    source: str = "anthropic"  # anthropic | openai | rules
     usage: dict[str, Any] = field(default_factory=dict)
     error: str | None = None
 
@@ -246,10 +250,18 @@ Work through it in this order:
 Rank priorities by expected impact on the athlete's progress, not by how alarming \
 the metric looks. A muscle at zero volume matters more than a 2% pace regression."""
 
+ASK_INSTRUCTION = (
+    "Answer questions about this briefing. Cite the specific numbers you rely on, and say "
+    "so plainly when the data can't answer the question."
+)
+
 
 def coach_report(briefing: dict[str, Any], config: Settings | None = None) -> CoachReport:
-    """Ask Claude for a structured coaching assessment of the briefing."""
+    """Ask the configured model for a structured coaching assessment."""
     config = config or default_settings
+    if config.provider == "openai":
+        return _openai_coach_report(briefing, config)
+
     client = _client(config)
 
     try:
@@ -266,7 +278,7 @@ def coach_report(briefing: dict[str, Any], config: Settings | None = None) -> Co
 
     if getattr(response, "stop_reason", None) == "refusal":
         return CoachReport(
-            error="Claude declined to answer this request.", model=config.model)
+            error="The model declined to answer this request.", model=config.model)
 
     try:
         payload = json.loads(_text_of(response))
@@ -274,6 +286,12 @@ def coach_report(briefing: dict[str, Any], config: Settings | None = None) -> Co
         return CoachReport(error=f"Could not parse the model's response: {exc}",
                            model=config.model)
 
+    return _report_from(payload, getattr(response, "model", config.model),
+                        _usage_of(response), "anthropic")
+
+
+def _report_from(payload: dict[str, Any], model: str, usage: dict[str, Any],
+                 source: str) -> CoachReport:
     return CoachReport(
         headline=payload.get("headline", ""),
         assessment=payload.get("assessment", ""),
@@ -282,22 +300,50 @@ def coach_report(briefing: dict[str, Any], config: Settings | None = None) -> Co
         ignore_for_now=payload.get("ignore_for_now", []),
         four_week_plan=payload.get("four_week_plan", []),
         data_gaps=payload.get("data_gaps", []),
-        model=getattr(response, "model", config.model),
-        usage=_usage_of(response),
+        model=model,
+        usage=usage,
+        source=source,
     )
+
+
+def _openai_coach_report(briefing: dict[str, Any], config: Settings) -> CoachReport:
+    from . import openai_backend
+
+    try:
+        payload, model, usage = openai_backend.coach_json(
+            config,
+            system=SYSTEM_PROMPT,
+            briefing=briefing,
+            instruction=COACH_INSTRUCTION,
+            schema=COACH_SCHEMA,
+            max_tokens=MAX_TOKENS,
+        )
+    except json.JSONDecodeError as exc:
+        return CoachReport(error=f"Could not parse the model's response: {exc}",
+                           model=config.openai_model, source="openai")
+    except Exception as exc:
+        log.exception("Coaching request failed")
+        return CoachReport(error=f"{type(exc).__name__}: {exc}",
+                           model=config.openai_model, source="openai")
+
+    return _report_from(payload, model, usage, "openai")
 
 
 def ask(question: str, briefing: dict[str, Any], history: list[dict[str, str]] | None = None,
         config: Settings | None = None) -> Iterator[str]:
     """Stream an answer to a follow-up question about the briefing."""
     config = config or default_settings
-    client = _client(config)
+    if config.provider == "openai":
+        from . import openai_backend
 
-    messages = _briefing_message(
-        briefing,
-        "Answer questions about this briefing. Cite the specific numbers you rely on, and say "
-        "so plainly when the data can't answer the question.",
-    )
+        yield from openai_backend.stream_answer(
+            config, system=SYSTEM_PROMPT, briefing=briefing,
+            instruction=ASK_INSTRUCTION, history=history, question=question,
+            max_tokens=4000)
+        return
+
+    client = _client(config)
+    messages = _briefing_message(briefing, ASK_INSTRUCTION)
     for turn in history or []:
         if turn.get("role") in {"user", "assistant"} and turn.get("content"):
             messages.append({"role": turn["role"], "content": turn["content"]})
@@ -347,9 +393,9 @@ def fallback_report(findings: list[Finding]) -> CoachReport:
         f"{sum(1 for f in findings if f.severity == 'watch')} worth watching, "
         f"{len(good)} going well.",
         "",
-        "This is the rule-based summary. Add an `ANTHROPIC_API_KEY` to `.env` for the "
-        "coaching layer, which weighs these findings against each other and turns them "
-        "into a plan.",
+        "This is the rule-based summary. Add an `ANTHROPIC_API_KEY` or `OPENAI_API_KEY` "
+        "to `.env` for the coaching layer, which weighs these findings against each "
+        "other and turns them into a plan.",
     ]
     if good:
         lines += ["", "**Going well:** " + "; ".join(f.title for f in good[:3]) + "."]

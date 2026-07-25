@@ -78,7 +78,7 @@ def _sidebar() -> None:
 
         st.divider()
         st.caption(
-            ("AI coach: ready" if settings.has_anthropic_key else "AI coach: no API key")
+            ("AI coach: ready" if settings.has_ai_key else "AI coach: no API key")
             + "  \n"
             + _garmin_status()
         )

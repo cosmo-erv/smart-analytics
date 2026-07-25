@@ -5,8 +5,8 @@ analytics with a GUI — muscle-level strength balance, running performance, spl
 run analysis, concurrent-training interference, and an AI coaching layer.
 
 Local-first: everything is cached in a SQLite file on your machine. The only outbound
-calls are to Garmin (to fetch) and, if you enable the coach, to the Claude API — which
-receives *computed metrics only*, never raw activity data.
+calls are to Garmin (to fetch) and, if you enable the coach, to Anthropic or OpenAI —
+which receive *computed metrics only*, never raw activity data.
 
 ## What it answers
 
@@ -123,14 +123,20 @@ speaks the same OAuth flow as the mobile app. Two consequences worth knowing:
 
 ### The AI coach
 
-Set `ANTHROPIC_API_KEY` in `.env`. Without it everything still works — you get the
-rule-based summary instead of the narrative layer.
+Set **either** `ANTHROPIC_API_KEY` or `OPENAI_API_KEY` in `.env`. Whichever key is
+present gets used; if both are, `AI_PROVIDER=openai` (or `anthropic`) picks one. Without
+any key everything still works — you get the rule-based summary instead of the narrative
+layer.
 
-The design rule is that **Claude never computes numbers**. The analytics engines do all
-the arithmetic and hand over a compact JSON briefing; Claude's job is to interpret it —
-rank what matters, explain the mechanism, turn findings into a plan. You can inspect the
-exact briefing on the AI Coach page. If a number isn't in there, the model has no way to
-know it.
+The model is configurable per provider: `SMART_ANALYTICS_MODEL` (default
+`claude-opus-5`) and `OPENAI_MODEL` (default `gpt-4.1`). Any OpenAI model supporting
+structured outputs works — set it to whatever your account can reach.
+
+The design rule is that **the model never computes numbers**. The analytics engines do
+all the arithmetic and hand over a compact JSON briefing; the model's job is to interpret
+it — rank what matters, explain the mechanism, turn findings into a plan. You can inspect
+the exact briefing on the AI Coach page. If a number isn't in there, the model has no way
+to know it.
 
 ## CLI
 

@@ -86,9 +86,9 @@ _MFA_PROMPTS: dict[str, str] = {
 def _no_code_help() -> None:
     """What to try when the code never turns up.
 
-    Worth spelling out, because the usual cause isn't something the user can see:
-    Garmin only dispatches an emailed code for its browser sign-in flow, so a
-    login that took a different route leaves you waiting on nothing.
+    Worth spelling out, because most of the causes aren't visible from here: the
+    wrong address on the account, a throttled burst of attempts, or a delivery
+    problem at the mail provider all look identical to the user.
     """
     with st.expander("The code hasn't arrived"):
         st.markdown(
@@ -306,10 +306,11 @@ def _connection_status(colors) -> None:
          "Detail": (f"tokens cached in `{settings.token_store.name}`"
                     if settings.has_cached_tokens
                     else settings.garmin_email or "sign in above, or set GARMIN_EMAIL in .env")},
-        {"Service": "Claude (AI coach)",
-         "Status": "key set" if settings.has_anthropic_key else "not configured",
-         "Detail": (f"model `{settings.model}`" if settings.has_anthropic_key
-                    else "set ANTHROPIC_API_KEY in .env for the coaching layer")},
+        {"Service": "AI coach",
+         "Status": (f"{settings.provider} key set" if settings.has_ai_key
+                    else "not configured"),
+         "Detail": (f"model `{settings.active_model}`" if settings.has_ai_key
+                    else "set ANTHROPIC_API_KEY or OPENAI_API_KEY in .env")},
     ]
     st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
 

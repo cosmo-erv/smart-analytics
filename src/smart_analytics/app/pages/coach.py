@@ -1,4 +1,4 @@
-"""AI Coach: Claude interprets the computed briefing and answers follow-ups."""
+"""AI Coach: the model interprets the computed briefing and answers follow-ups."""
 
 from __future__ import annotations
 
@@ -30,16 +30,18 @@ def render() -> None:
 
     st.markdown(
         f'<div style="color:{colors.ink_secondary};font-size:0.94rem;line-height:1.55;">'
-        f"Claude reads the <strong>computed</strong> metrics — not raw activity files — and "
+        f"The coach reads the <strong>computed</strong> metrics — not raw activity files "
+        f"— and "
         f"interprets them: what matters most, why, and what to change. Every number it "
         f"quotes comes from the analytics engine, so the arithmetic stays reproducible."
         f"</div>",
         unsafe_allow_html=True,
     )
 
-    if not settings.has_anthropic_key:
+    if not settings.has_ai_key:
         st.info(
-            "No `ANTHROPIC_API_KEY` found in `.env`. Showing the rule-based summary instead — "
+            "No `ANTHROPIC_API_KEY` or `OPENAI_API_KEY` found in `.env`. Showing the "
+            "rule-based summary instead — "
             "all metrics and findings are still computed, you just don't get the narrative "
             "layer that weighs them against each other."
         )
@@ -53,16 +55,16 @@ def render() -> None:
             st.session_state.pop(CHAT_KEY, None)
             st.rerun()
     with controls[2]:
-        if settings.has_anthropic_key:
-            st.caption(f"Model: `{settings.model}`")
+        if settings.has_ai_key:
+            st.caption(f"Model: `{settings.active_model}` ({settings.provider})")
 
     stale = st.session_state.get(REPORT_VERSION_KEY) != data_version()
     if REPORT_KEY in st.session_state and stale:
         st.warning("Your data changed since this assessment was generated — regenerate it.")
 
     if generate:
-        with st.spinner("Claude is reviewing your training…"):
-            if settings.has_anthropic_key:
+        with st.spinner("Reviewing your training…"):
+            if settings.has_ai_key:
                 try:
                     result = coach_report(briefing)
                 except CoachUnavailable as exc:
@@ -154,7 +156,7 @@ def render() -> None:
             f"{result.usage.get('output_tokens') or 0} output tokens."
         )
 
-    if settings.has_anthropic_key:
+    if settings.has_ai_key:
         st.divider()
         _chat(briefing, colors)
 
@@ -188,7 +190,7 @@ def _chat(briefing: dict, colors) -> None:
 
 
 def _briefing_preview(briefing: dict, colors) -> None:
-    with st.expander("Inspect the exact briefing sent to Claude"):
+    with st.expander("Inspect the exact briefing sent to the model"):
         st.caption(
             "This is the whole input. If a number isn't in here, the model has no way to "
             "know it — which is the point: no raw files, no room to invent statistics."
