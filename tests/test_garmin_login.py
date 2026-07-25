@@ -96,7 +96,8 @@ def test_login_without_mfa_caches_tokens_immediately(client):
 def test_mfa_login_needs_a_code_before_anything_is_written(client):
     result = client.begin_login("athlete@example.com", MFA_PASSWORD)
 
-    assert result == {"status": "mfa_required", "method": "email"}
+    assert result["status"] == "mfa_required"
+    assert result["method"] == "email"
     # Nothing is cached until the second factor is satisfied.
     assert not client.settings.has_cached_tokens
 
@@ -115,6 +116,81 @@ def test_a_rejected_code_is_recoverable_rather_than_fatal(client):
 
     # The pending login is still usable, so the user can just retype the code.
     assert client.complete_login(GOOD_CODE)["status"] == "ok"
+
+
+class WebFlowRecorder:
+    """Stands in for garminconnect's browser sign-in form."""
+
+    def __init__(self, outcome: str) -> None:
+        self.outcome = outcome
+        self.calls = 0
+
+    def __call__(self, email: str, password: str) -> None:
+        from garminconnect.client import _MFARequired
+        self.calls += 1
+        if self.outcome == "mfa":
+            raise _MFARequired()
+        if self.outcome == "unusable":
+            raise RuntimeError("curl_cffi not available")
+        if self.outcome == "rejected":
+            raise garminconnect.GarminConnectAuthenticationError("bad credentials")
+
+
+def _install_web_flow(client, monkeypatch, outcome: str) -> WebFlowRecorder:
+    recorder = WebFlowRecorder(outcome)
+    monkeypatch.setattr(FakeTokenStore, "_widget_web_login", recorder, raising=False)
+    return recorder
+
+
+def test_the_web_sign_in_form_is_tried_before_the_mobile_api(client, monkeypatch):
+    """Only the web form makes Garmin dispatch an emailed code.
+
+    The mobile API reports an MFA challenge without one being sent, which left
+    the user waiting on an email that was never coming.
+    """
+    recorder = _install_web_flow(client, monkeypatch, "mfa")
+    result = client.begin_login("athlete@example.com", "correct-horse")
+
+    assert recorder.calls == 1
+    assert result["status"] == "mfa_required"
+    # ...and the challenge it raised is the one we then verify against.
+    assert client.complete_login(GOOD_CODE)["status"] == "ok"
+
+
+def test_a_web_flow_that_logs_straight_in_needs_no_code(client, monkeypatch):
+    recorder = _install_web_flow(client, monkeypatch, "ok")
+    result = client.begin_login("athlete@example.com", "correct-horse")
+
+    assert recorder.calls == 1
+    assert result["status"] == "ok"
+    assert client.settings.has_cached_tokens
+
+
+def test_an_unusable_web_flow_falls_back_to_the_default_chain(client, monkeypatch):
+    """A missing dependency or a WAF block must not fail the login outright."""
+    recorder = _install_web_flow(client, monkeypatch, "unusable")
+    result = client.begin_login("athlete@example.com", MFA_PASSWORD)
+
+    assert recorder.calls == 1
+    # Fell through to FakeGarmin.login(), which reports the MFA challenge.
+    assert result["status"] == "mfa_required"
+    assert result["method"] == "email"
+
+
+def test_bad_credentials_from_the_web_flow_are_not_retried(client, monkeypatch):
+    """Retrying a rejected password just burns attempts toward a lockout."""
+    recorder = _install_web_flow(client, monkeypatch, "rejected")
+    with pytest.raises(GarminAuthError, match="rejected the login"):
+        client.begin_login("athlete@example.com", "correct-horse")
+    assert recorder.calls == 1
+
+
+def test_the_web_flow_can_be_turned_off(client, monkeypatch):
+    recorder = _install_web_flow(client, monkeypatch, "mfa")
+    result = client.begin_login("athlete@example.com", MFA_PASSWORD,
+                                prefer_web_flow=False)
+    assert recorder.calls == 0
+    assert result["status"] == "mfa_required"
 
 
 def test_a_null_client_state_still_counts_as_a_login_in_progress(client):

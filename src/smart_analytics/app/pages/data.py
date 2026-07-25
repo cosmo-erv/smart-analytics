@@ -20,6 +20,7 @@ from ..state import (
     current_report,
     garmin_account_name,
     garmin_login_stage,
+    garmin_mfa_flow,
     garmin_mfa_method,
     garmin_sign_out,
     palette,
@@ -81,6 +82,31 @@ _MFA_PROMPTS: dict[str, str] = {
 }
 
 
+def _no_code_help() -> None:
+    """What to try when the code never turns up.
+
+    Worth spelling out, because the usual cause isn't something the user can see:
+    Garmin only dispatches an emailed code for its browser sign-in flow, so a
+    login that took a different route leaves you waiting on nothing.
+    """
+    with st.expander("The code hasn't arrived"):
+        st.markdown(
+            "1. **Check spam**, and search for `noreply@garmin.com`. Codes expire quickly, "
+            "so an older one won't work — use **Start over** for a fresh one.\n"
+            "2. **Check the address on the Garmin account.** The code goes there, which "
+            "isn't necessarily the address you typed here.\n"
+            "3. **Confirm the method** at Garmin Connect → Account settings → Sign-in & "
+            "security → Multi-factor authentication. An authenticator app sends nothing.\n"
+            "4. **Still nothing?** Turn MFA off in those same Garmin settings, sign in here "
+            "once, then turn it back on. The sign-in caches OAuth tokens, and those keep "
+            "working with MFA re-enabled — so this is a one-time step, not a permanent "
+            "downgrade of your account security."
+        )
+        flow = garmin_mfa_flow()
+        if flow:
+            st.caption(f"Diagnostic — Garmin raised the challenge over its `{flow}` flow.")
+
+
 def _garmin_account(colors) -> None:
     ui.section("Garmin Connect account", None, colors)
     stage = garmin_login_stage()
@@ -103,12 +129,7 @@ def _garmin_account(colors) -> None:
         method = garmin_mfa_method()
         st.info(_MFA_PROMPTS.get(method, _MFA_PROMPTS[MFA_UNKNOWN]))
         if method != MFA_AUTHENTICATOR:
-            st.caption(
-                "No code arriving? Check your spam folder, and check which method your "
-                "account actually uses at Garmin Connect → **Account settings → Sign-in & "
-                "security → Multi-factor authentication**. If it's set to an authenticator "
-                "app, no email or text is sent — take the code from the app."
-            )
+            _no_code_help()
         with st.form("garmin_mfa"):
             code = st.text_input("Verification code", max_chars=12,
                                  help="Codes expire quickly — request a new one if it's stale.")

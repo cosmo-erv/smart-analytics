@@ -102,6 +102,10 @@ MFA_AUTHENTICATOR = "authenticator"
 MFA_UNKNOWN = "unknown"
 
 
+# Sentinel: the web sign-in flow wasn't usable, so run garminconnect's own chain.
+_FALL_BACK = object()
+
+
 def normalise_mfa_method(raw: Any) -> str:
     """Classify Garmin's MFA method string, which isn't a documented enum."""
     text = str(raw or "").strip().lower()
@@ -177,7 +181,8 @@ class GarminClient:
 
     # --- interactive login (for the GUI) -----------------------------------
 
-    def begin_login(self, email: str, password: str) -> dict[str, Any]:
+    def begin_login(self, email: str, password: str, *,
+                    prefer_web_flow: bool = True) -> dict[str, Any]:
         """Start a login without blocking on an MFA prompt.
 
         A desktop script can block on ``input()`` for the emailed code, but a web
@@ -185,9 +190,15 @@ class GarminClient:
         back with ``mfa_required`` plus the opaque client state, which
         :meth:`complete_login` hands back along with the code.
 
+        ``prefer_web_flow`` runs Garmin's browser sign-in form ahead of the mobile
+        API login. Both raise the same MFA challenge, but only the web form makes
+        Garmin dispatch an emailed code — the mobile API expects the app to
+        request one over an endpoint the library doesn't implement. See
+        :meth:`_web_flow_login`.
+
         Returns ``{"status": "ok"}`` when no MFA was needed, or
-        ``{"status": "mfa_required", "method": ...}`` — the method being where the
-        code will turn up, so the UI can point at the right place.
+        ``{"status": "mfa_required", "method": ..., "flow": ...}`` — the method
+        being where the code will turn up, so the UI can point at the right place.
         """
         from garminconnect import Garmin, GarminConnectAuthenticationError
 
@@ -197,25 +208,71 @@ class GarminClient:
         self._login_email = email.strip()
         try:
             api = Garmin(email=email, password=password, return_on_mfa=True)
-            status, client_state = api.login()
+            self._api = api
+            status, client_state = (self._web_flow_login(api, email, password)
+                                   if prefer_web_flow else (_FALL_BACK, None))
+            if status is _FALL_BACK:
+                status, client_state = api.login()
         except GarminConnectAuthenticationError as exc:
             raise GarminAuthError(f"Garmin rejected the login: {exc}") from exc
         except Exception as exc:
             raise GarminAuthError(f"Could not reach Garmin Connect: {exc}") from exc
 
-        self._api = api
         if status == "needs_mfa":
             # The opaque state is None in current garminconnect — the challenge
             # is held on the client itself — so a separate flag tracks that a
             # login is mid-flight rather than testing the state for truthiness.
             self._pending_mfa_state = client_state
             self._mfa_pending = True
-            return {"status": "mfa_required", "method": self.mfa_method()}
+            return {"status": "mfa_required", "method": self.mfa_method(),
+                    "flow": self.mfa_flow()}
 
         self._pending_mfa_state = None
         self._mfa_pending = False
         self._save_tokens()
         return {"status": "ok", "display_name": self.display_name()}
+
+    def _web_flow_login(self, api: Any, email: str,
+                        password: str) -> tuple[Any, Any]:
+        """Try Garmin's browser sign-in form, returning garminconnect's contract.
+
+        garminconnect tries a mobile JSON login first, and that one *reports* an
+        MFA challenge without Garmin ever sending a code: dispatching it needs a
+        request the library has no code for (it only ever verifies a code, never
+        asks for one). The browser form is the flow Garmin's own website uses, so
+        the challenge it raises is the one that comes with an email.
+
+        Returns ``_FALL_BACK`` as the status if the web form isn't usable, so the
+        caller runs the normal strategy chain and behaviour is unchanged. Only a
+        genuine credential rejection propagates.
+        """
+        try:
+            from garminconnect.client import _MFARequired
+        except Exception:  # noqa: BLE001 — private, and absent in other versions
+            return _FALL_BACK, None
+
+        web_login = getattr(getattr(api, "client", None), "_widget_web_login", None)
+        if web_login is None:
+            return _FALL_BACK, None
+
+        from garminconnect import GarminConnectAuthenticationError
+        try:
+            web_login(email, password)
+        except _MFARequired:
+            log.info("Garmin web sign-in raised an MFA challenge (code dispatched)")
+            return "needs_mfa", None
+        except GarminConnectAuthenticationError:
+            raise
+        except Exception as exc:  # noqa: BLE001 — rate limit, WAF, missing curl_cffi
+            log.info("Garmin web sign-in unusable (%s); trying the default chain", exc)
+            return _FALL_BACK, None
+        return None, None
+
+    def mfa_flow(self) -> str | None:
+        """Which login flow raised the challenge — useful when a code never lands."""
+        holder = getattr(self._api, "client", None) or self._api
+        flow = getattr(holder, "_mfa_flow", None)
+        return str(flow) if flow else None
 
     def mfa_method(self) -> str:
         """Where this account's second factor is delivered, if Garmin said."""

@@ -28,6 +28,7 @@ LOGIN_CLIENT_KEY = "garmin_login_client"
 LOGIN_STAGE_KEY = "garmin_login_stage"   # "" | "mfa" | "connected"
 LOGIN_NAME_KEY = "garmin_account_name"
 LOGIN_MFA_METHOD_KEY = "garmin_mfa_method"
+LOGIN_MFA_FLOW_KEY = "garmin_mfa_flow"
 
 
 @st.cache_resource(show_spinner=False)
@@ -115,6 +116,11 @@ def garmin_mfa_method() -> str:
     return st.session_state.get(LOGIN_MFA_METHOD_KEY) or MFA_UNKNOWN
 
 
+def garmin_mfa_flow() -> str | None:
+    """Which Garmin login flow raised the challenge, for the no-code diagnostics."""
+    return st.session_state.get(LOGIN_MFA_FLOW_KEY) or None
+
+
 def begin_garmin_login(email: str, password: str) -> dict[str, Any]:
     """Step one: exchange credentials for tokens, or ask for an MFA code.
 
@@ -134,6 +140,7 @@ def begin_garmin_login(email: str, password: str) -> dict[str, Any]:
         st.session_state[LOGIN_CLIENT_KEY] = client
         st.session_state[LOGIN_STAGE_KEY] = "mfa"
         st.session_state[LOGIN_MFA_METHOD_KEY] = result.get("method")
+        st.session_state[LOGIN_MFA_FLOW_KEY] = result.get("flow")
         return {"ok": True, "mfa_required": True, "method": result.get("method")}
 
     _finish_login(client, result.get("display_name"))
@@ -170,7 +177,7 @@ def garmin_sign_out() -> None:
     """Forget the cached tokens. Nothing already synced is affected."""
     GarminClient().sign_out()
     for key in (LOGIN_CLIENT_KEY, LOGIN_STAGE_KEY, LOGIN_NAME_KEY,
-                LOGIN_MFA_METHOD_KEY):
+                LOGIN_MFA_METHOD_KEY, LOGIN_MFA_FLOW_KEY):
         st.session_state.pop(key, None)
 
 
