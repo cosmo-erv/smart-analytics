@@ -8,9 +8,21 @@ import streamlit as st
 from ... import db
 from ...config import settings
 from ...domain.exercises import coverage_report
+from ...domain.garmin_muscles import unmappable_reason
 from ...garmin.sync import last_sync_at
 from .. import components as ui
-from ..state import bump_data_version, conn, palette, run_sync
+from ..state import (
+    begin_garmin_login,
+    bump_data_version,
+    complete_garmin_login,
+    conn,
+    current_report,
+    garmin_account_name,
+    garmin_login_stage,
+    garmin_sign_out,
+    palette,
+    run_sync,
+)
 
 
 def render() -> None:
@@ -29,15 +41,20 @@ def render() -> None:
     ], palette=colors)
     ui.stat_tiles([
         {"label": "Wellness days", "value": f"{counts['daily_metrics']:,}"},
+        {"label": "Workouts", "value": f"{counts['workouts']:,}"},
         {"label": "Personal records", "value": f"{counts['personal_records']:,}"},
         {"label": "Open niggles", "value": f"{counts['niggles']:,}"},
         {"label": "Snapshots", "value": f"{counts['snapshots']:,}"},
-        {"label": "Activity types", "value": f"{counts['types']:,}"},
     ], palette=colors)
+    st.caption(f"{counts['types']} activity types · "
+               f"{counts['workout_steps']:,} workout steps cached.")
     if counts["first_date"]:
         st.caption(f"Cached range {counts['first_date']} → {counts['last_date']} · "
                    f"last sync {last_sync_at(connection) or 'never'} · "
                    f"database `{settings.db_path}`")
+
+    st.divider()
+    _garmin_account(colors)
 
     st.divider()
     _sync_panel(colors)
@@ -50,6 +67,66 @@ def render() -> None:
 
     st.divider()
     _maintenance(connection, colors)
+
+
+def _garmin_account(colors) -> None:
+    ui.section("Garmin Connect account", None, colors)
+    stage = garmin_login_stage()
+
+    if stage == "connected":
+        name = garmin_account_name()
+        st.success(f"Connected to Garmin Connect{f' as **{name}**' if name else ''}.")
+        st.caption(
+            "Your password isn't stored anywhere. The login exchanged it for OAuth tokens, "
+            f"which are cached in `{settings.token_store.name}/` (gitignored) and are what "
+            "later syncs resume from — so you shouldn't be asked for a code again until they "
+            "expire."
+        )
+        if st.button("Sign out of Garmin", type="secondary"):
+            garmin_sign_out()
+            st.rerun()
+        return
+
+    if stage == "mfa":
+        st.info("Garmin sent a verification code to your email. Enter it to finish signing in.")
+        with st.form("garmin_mfa"):
+            code = st.text_input("Verification code", max_chars=12,
+                                 help="Codes expire quickly — request a new one if it's stale.")
+            confirmed = st.form_submit_button("Verify and connect", type="primary")
+        if confirmed:
+            result = complete_garmin_login(code)
+            if result["ok"]:
+                st.rerun()
+            else:
+                st.error(result["error"])
+        if st.button("Cancel", type="secondary"):
+            garmin_sign_out()
+            st.rerun()
+        return
+
+    st.write(
+        "Sign in to sync your own activities, structured workouts and Garmin's own "
+        "training metrics. Multi-factor authentication is supported."
+    )
+    with st.form("garmin_login"):
+        email = st.text_input("Garmin Connect email", value=settings.garmin_email,
+                              autocomplete="username")
+        password = st.text_input("Password", type="password", autocomplete="current-password")
+        submitted = st.form_submit_button("Connect to Garmin", type="primary")
+    if submitted:
+        with st.spinner("Signing in to Garmin Connect…"):
+            result = begin_garmin_login(email, password)
+        if not result["ok"]:
+            st.error(result["error"])
+        else:
+            st.rerun()
+
+    st.caption(
+        "This uses the same OAuth flow as the Garmin Connect mobile app — Garmin has no "
+        "public consumer API. The password is sent to Garmin only, used once to mint tokens, "
+        "and never written to the database. You can also set `GARMIN_EMAIL` / "
+        "`GARMIN_PASSWORD` in `.env` instead of signing in here."
+    )
 
 
 def _sync_panel(colors) -> None:
@@ -98,7 +175,7 @@ def _sync_panel(colors) -> None:
                       "lactate threshold, zones, race predictions and personal records. "
                       "Roughly three requests per day."))
 
-        row2 = st.columns(3)
+        row2 = st.columns(4)
         with row2[0]:
             incremental = st.checkbox(
                 "Incremental (resume from the last synced activity)", value=True,
@@ -107,6 +184,11 @@ def _sync_panel(colors) -> None:
             fetch_details = st.checkbox("Fetch per-set strength detail", value=True)
         with row2[2]:
             fetch_splits = st.checkbox("Fetch per-lap splits", value=True)
+        with row2[3]:
+            fetch_workouts = st.checkbox(
+                "Fetch structured workouts", value=True,
+                help=("Workout definitions carry Garmin's own muscle assignments for each "
+                      "exercise, which take precedence over the built-in mapping."))
 
         submitted = st.form_submit_button("Run sync", type="primary")
 
@@ -115,6 +197,7 @@ def _sync_panel(colors) -> None:
                           fetch_details=fetch_details, detail_batch=int(detail_batch),
                           wellness_days=int(wellness_days), incremental=incremental,
                           fetch_splits=fetch_splits, split_batch=int(split_batch),
+                          fetch_workouts=fetch_workouts,
                           physiology_days=int(physiology_days))
         if result["ok"]:
             st.success(f"Done — {result['summary']}")
@@ -168,11 +251,11 @@ def _connection_status(colors) -> None:
     ui.section("Connections", None, colors)
     rows = [
         {"Service": "Garmin Connect",
-         "Status": ("cached tokens" if settings.has_cached_tokens else
+         "Status": ("signed in" if settings.has_cached_tokens else
                     "credentials set" if settings.has_garmin_credentials else "not configured"),
-         "Detail": (f"token store `{settings.token_store.name}`"
+         "Detail": (f"tokens cached in `{settings.token_store.name}`"
                     if settings.has_cached_tokens
-                    else settings.garmin_email or "set GARMIN_EMAIL / GARMIN_PASSWORD in .env")},
+                    else settings.garmin_email or "sign in above, or set GARMIN_EMAIL in .env")},
         {"Service": "Claude (AI coach)",
          "Status": "key set" if settings.has_anthropic_key else "not configured",
          "Detail": (f"model `{settings.model}`" if settings.has_anthropic_key
@@ -180,13 +263,60 @@ def _connection_status(colors) -> None:
     ]
     st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
 
-    coverage = coverage_report()
-    st.caption(
-        f"Exercise map: {coverage['categories']} Garmin categories and "
-        f"{coverage['named_variants']} named variants across {coverage['muscles']} muscles. "
-        f"Garmin has no muscle data of its own — this mapping is what makes the strength "
-        f"analysis possible, and it lives in `src/smart_analytics/domain/exercises.py`."
-    )
+    _muscle_mapping(colors)
+
+
+def _muscle_mapping(colors) -> None:
+    """Where each exercise's muscle attribution came from.
+
+    Garmin's structured workouts state which muscles it assigns to an exercise,
+    and that assignment wins. The curated table only fills the gaps, so it's
+    worth showing which of the two is actually doing the work.
+    """
+    ui.section("Muscle mapping", None, colors)
+    sources = current_report().muscle_sources
+    coverage = sources or coverage_report()
+
+    ui.stat_tiles([
+        {"label": "From Garmin", "value": f"{coverage.get('garmin_entries', 0):,}",
+         "note": "exercises and categories Garmin assigned muscles to"},
+        {"label": "Named exercises", "value": f"{coverage.get('garmin_named', 0):,}",
+         "note": "from your structured workouts"},
+        {"label": "Built-in fallback", "value": f"{coverage.get('named_variants', 0):,}",
+         "note": f"named variants, plus {coverage.get('categories', 0)} categories"},
+    ], palette=colors)
+
+    if coverage.get("garmin_entries"):
+        st.caption(
+            "Garmin's own assignment is used wherever it exists — matched on the exercise "
+            "name first, then its category. The built-in table in "
+            "`src/smart_analytics/domain/exercises.py` covers anything Garmin didn't label, "
+            "and movement patterns (push/pull/hinge/squat) always come from it, since Garmin "
+            "doesn't classify movements that way."
+        )
+    else:
+        st.caption(
+            "No Garmin muscle data has been synced yet, so the built-in mapping is doing all "
+            "the work. Sign in and run a sync with **Fetch structured workouts** enabled to "
+            "use Garmin's own assignments instead."
+        )
+
+    unmatched = sources.get("unmatched_names") or {}
+    if unmatched:
+        label = ("1 Garmin muscle name couldn't be placed" if len(unmatched) == 1
+                 else f"{len(unmatched)} Garmin muscle names couldn't be placed")
+        with st.expander(label):
+            st.caption(
+                "These appeared in your workouts but have no home in the 18-muscle model. "
+                "The exercise is still credited using the muscles that did match."
+            )
+            st.dataframe(
+                pd.DataFrame([
+                    {"Garmin name": name, "Times seen": count,
+                     "Why": unmappable_reason(name) or "not recognised — worth mapping"}
+                    for name, count in unmatched.items()
+                ]),
+                use_container_width=True, hide_index=True)
 
 
 def _maintenance(connection, colors) -> None:

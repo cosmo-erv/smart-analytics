@@ -8,7 +8,23 @@ import pytest
 
 from smart_analytics import db
 from smart_analytics.analytics import build_report
+from smart_analytics.domain import exercises
 from smart_analytics.garmin import SampleGarminClient, sync
+
+
+@pytest.fixture(autouse=True)
+def _isolate_garmin_muscle_map():
+    """Keep the process-wide Garmin muscle map from leaking between tests.
+
+    ``build_report`` installs the synced map as the resolver's default, which is
+    the behaviour we want in the app but would otherwise make a test's outcome
+    depend on which tests — or which session-scoped fixtures — ran before it. So
+    every test starts with no map installed and any it installs is discarded.
+    """
+    previous = exercises.active_garmin_muscle_map()
+    exercises.set_garmin_muscle_map(None)
+    yield
+    exercises.set_garmin_muscle_map(previous)
 
 
 @pytest.fixture(scope="session")

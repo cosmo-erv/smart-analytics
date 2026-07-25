@@ -12,6 +12,10 @@ coaching layer have something true to say:
 * rowing strength has been flat for months while bench and squat progress;
 * running volume sits in the moderate "grey zone" instead of polarised easy/hard;
 * cadence is low and efficiency factor plateaus in the final block.
+
+Every strength session references a structured workout, as the real account does,
+so demo mode also exercises the workout-definition path and Garmin's own
+exercise → muscle assignments rather than only the curated fallback table.
 """
 
 from __future__ import annotations
@@ -24,6 +28,63 @@ import numpy as np
 
 DEFAULT_DAYS = 400
 _SEED = 7
+
+# Garmin's own muscle assignments, as they appear in a structured strength
+# workout: anatomical names, primary movers separated from assisting muscles.
+# ``DELTOID`` on the row is intentional — Garmin does emit unqualified names, and
+# the app should report them as unplaceable rather than guess a shoulder head.
+WORKOUT_MUSCLES: dict[str, tuple[list[str], list[str]]] = {
+    "BARBELL_BENCH_PRESS": (["PECTORALIS_MAJOR"], ["DELTOID_ANTERIOR", "TRICEPS_BRACHII"]),
+    "INCLINE_DUMBBELL_BENCH_PRESS": (["PECTORALIS_MAJOR", "DELTOID_ANTERIOR"],
+                                     ["TRICEPS_BRACHII"]),
+    "DUMBBELL_SHOULDER_PRESS": (["DELTOID_ANTERIOR"], ["DELTOID_LATERAL", "TRICEPS_BRACHII"]),
+    "CABLE_TRICEPS_EXTENSION": (["TRICEPS_BRACHII"], []),
+    "DUMBBELL_LATERAL_RAISE": (["DELTOID_LATERAL"], ["TRAPEZIUS"]),
+    "BARBELL_ROW": (["LATISSIMUS_DORSI", "TRAPEZIUS"], ["BICEPS_BRACHII", "DELTOID"]),
+    "WIDE_GRIP_LAT_PULLDOWN": (["LATISSIMUS_DORSI"], ["BICEPS_BRACHII", "TERES_MAJOR"]),
+    "DUMBBELL_CURL": (["BICEPS_BRACHII"], ["BRACHIORADIALIS"]),
+    "CABLE_FACE_PULL": (["DELTOID_POSTERIOR"], ["RHOMBOIDS", "TRAPEZIUS"]),
+    "CABLE_KNEELING_CRUNCH": (["RECTUS_ABDOMINIS"], ["OBLIQUES", "ILIOPSOAS"]),
+    "BARBELL_BACK_SQUAT": (["QUADRICEPS", "GLUTEUS_MAXIMUS"],
+                           ["ERECTOR_SPINAE", "ADDUCTOR_MAGNUS"]),
+    "LEG_PRESS": (["QUADRICEPS"], ["GLUTEUS_MAXIMUS"]),
+    "STANDING_CALF_RAISE": (["GASTROCNEMIUS"], ["SOLEUS"]),
+    "SEATED_LEG_CURL": (["BICEPS_FEMORIS", "SEMITENDINOSUS"], ["GASTROCNEMIUS"]),
+}
+
+# One session per plan is logged in pounds, as a US-unit account would be, so the
+# unit handling in :mod:`.workouts` is exercised rather than assumed.
+POUND_EXERCISES = {"INCLINE_DUMBBELL_BENCH_PRESS", "DUMBBELL_CURL"}
+WORKOUT_IDS = {"push": "880001", "pull": "880002", "legs": "880003"}
+
+# (category, name, sets, reps, base kg, kg gained per week, skip probability).
+# Shared by the logged sets and the structured workout definitions, so the plan
+# the athlete follows and the plan Garmin stores agree with each other.
+LIFT_PLANS: dict[str, list[tuple[str, str, int, int, float, float, float]]] = {
+    "push": [
+        ("BENCH_PRESS", "BARBELL_BENCH_PRESS", 4, 6, 72.5, 0.22, 0.0),
+        ("BENCH_PRESS", "INCLINE_DUMBBELL_BENCH_PRESS", 3, 10, 24.0, 0.05, 0.1),
+        ("SHOULDER_PRESS", "DUMBBELL_SHOULDER_PRESS", 3, 9, 20.0, 0.05, 0.15),
+        ("TRICEPS_EXTENSION", "CABLE_TRICEPS_EXTENSION", 3, 12, 25.0, 0.06, 0.2),
+        ("LATERAL_RAISE", "DUMBBELL_LATERAL_RAISE", 3, 14, 8.0, 0.02, 0.3),
+        ("CORE", "CABLE_KNEELING_CRUNCH", 3, 15, 30.0, 0.05, 0.25),
+    ],
+    "pull": [
+        # Rowing strength has been stalled for months (gain ≈ 0).
+        ("ROW", "BARBELL_ROW", 4, 8, 62.5, 0.01, 0.0),
+        ("PULL_UP", "WIDE_GRIP_LAT_PULLDOWN", 3, 10, 55.0, 0.04, 0.1),
+        ("CURL", "DUMBBELL_CURL", 3, 11, 14.0, 0.03, 0.15),
+        # Rear delts almost never get trained.
+        ("SHOULDER_STABILITY", "CABLE_FACE_PULL", 3, 15, 18.0, 0.02, 0.8),
+    ],
+    "legs": [
+        ("SQUAT", "BARBELL_BACK_SQUAT", 5, 5, 95.0, 0.35, 0.0),
+        ("SQUAT", "LEG_PRESS", 3, 10, 140.0, 0.3, 0.15),
+        ("CALF_RAISE", "STANDING_CALF_RAISE", 3, 15, 60.0, 0.1, 0.35),
+        # Hamstrings are the neglected antagonist.
+        ("LEG_CURL", "SEATED_LEG_CURL", 3, 12, 35.0, 0.03, 0.75),
+    ],
+}
 
 
 def _iso(dt: datetime) -> str:
@@ -66,6 +127,94 @@ class SampleGarminClient:
 
     def exercise_sets(self, activity_id: str) -> list[dict[str, Any]]:
         return self._sets.get(str(activity_id), [])
+
+    # --- structured workouts and Garmin's muscle assignments ----------------
+
+    def workout_list(self, limit: int = 100) -> list[dict[str, Any]]:
+        """Summaries only — no step tree, exactly as Garmin's list endpoint."""
+        return [
+            {"workoutId": int(WORKOUT_IDS[plan]), "workoutName": f"{plan.title()} Day",
+             "sportType": {"sportTypeId": 5, "sportTypeKey": "strength_training"},
+             "updateDate": _iso(datetime.combine(self.end, datetime.min.time())),
+             "estimatedDurationInSecs": 3600}
+            for plan in LIFT_PLANS
+        ][:limit]
+
+    def workout(self, workout_id: str) -> dict[str, Any]:
+        for plan, known_id in WORKOUT_IDS.items():
+            if str(workout_id) == known_id:
+                return self._workout_payload(plan)
+        return {}
+
+    def exercise_library(self) -> list[dict[str, Any]]:
+        """Category-level assignments, as an account with a library would return.
+
+        Deliberately coarser than the workout definitions, so the resolver's
+        preference for a named exercise over its category is exercised too.
+        """
+        by_category: dict[str, tuple[list[str], list[str]]] = {}
+        for plan in LIFT_PLANS.values():
+            for category, name, *_ in plan:
+                if name in WORKOUT_MUSCLES:
+                    by_category.setdefault(category, WORKOUT_MUSCLES[name])
+        return [
+            {"category": category, "exercise_name": "",
+             "primary_muscles": primary, "secondary_muscles": secondary,
+             "source": "exercise_library"}
+            for category, (primary, secondary) in by_category.items()
+        ]
+
+    def _workout_payload(self, plan: str) -> dict[str, Any]:
+        """A strength workout shaped like Garmin's: segments of repeat groups.
+
+        Each exercise sits inside a repeat group whose iteration count is the set
+        count, which is how Garmin stores a lifting workout — the step tree has to
+        be flattened before the muscle assignments can be read.
+        """
+        steps: list[dict[str, Any]] = []
+        order = 1
+        for category, name, n_sets, reps, base_kg, _per_week, _skip in LIFT_PLANS[plan]:
+            primary, secondary = WORKOUT_MUSCLES.get(name, ([], []))
+            in_pounds = name in POUND_EXERCISES
+            weight = (round(base_kg / 0.45359237, 1) if in_pounds
+                      else round(base_kg * 1000, 0))
+            group_order, order = order, order + 1
+            steps.append({
+                "stepId": int(WORKOUT_IDS[plan]) * 100 + group_order,
+                "stepOrder": group_order,
+                "type": "RepeatGroupDTO",
+                "stepType": {"stepTypeId": 6, "stepTypeKey": "repeat"},
+                "numberOfIterations": n_sets,
+                "smartRepeat": False,
+                "workoutSteps": [{
+                    "stepId": int(WORKOUT_IDS[plan]) * 100 + order,
+                    "stepOrder": order,
+                    "type": "ExecutableStepDTO",
+                    "stepType": {"stepTypeId": 3, "stepTypeKey": "interval"},
+                    "category": category,
+                    "exerciseName": name,
+                    "endCondition": {"conditionTypeKey": "reps"},
+                    "endConditionValue": float(reps),
+                    "weightValue": weight,
+                    "weightUnit": {"unitKey": "pound" if in_pounds else "gram"},
+                    "primaryMuscles": primary,
+                    "secondaryMuscles": secondary,
+                }],
+            })
+            order += 1
+
+        return {
+            "workoutId": int(WORKOUT_IDS[plan]),
+            "workoutName": f"{plan.title()} Day",
+            "sportType": {"sportTypeId": 5, "sportTypeKey": "strength_training"},
+            "updateDate": _iso(datetime.combine(self.end, datetime.min.time())),
+            "estimatedDurationInSecs": 3600,
+            "workoutSegments": [{
+                "segmentOrder": 1,
+                "sportType": {"sportTypeId": 5, "sportTypeKey": "strength_training"},
+                "workoutSteps": steps,
+            }],
+        }
 
     # --- Garmin's own physiological model (demo equivalents) ----------------
 
@@ -349,35 +498,9 @@ class SampleGarminClient:
         rng = self.rng
         started = datetime.combine(day, datetime.min.time()) + timedelta(hours=17, minutes=45)
 
-        # (category, name, sets, reps, base kg, kg gained per week, skip probability)
-        plans: dict[str, list[tuple[str, str, int, int, float, float, float]]] = {
-            "push": [
-                ("BENCH_PRESS", "BARBELL_BENCH_PRESS", 4, 6, 72.5, 0.22, 0.0),
-                ("BENCH_PRESS", "INCLINE_DUMBBELL_BENCH_PRESS", 3, 10, 24.0, 0.05, 0.1),
-                ("SHOULDER_PRESS", "DUMBBELL_SHOULDER_PRESS", 3, 9, 20.0, 0.05, 0.15),
-                ("TRICEPS_EXTENSION", "CABLE_TRICEPS_EXTENSION", 3, 12, 25.0, 0.06, 0.2),
-                ("LATERAL_RAISE", "DUMBBELL_LATERAL_RAISE", 3, 14, 8.0, 0.02, 0.3),
-            ],
-            "pull": [
-                # Rowing strength has been stalled for months (gain ≈ 0).
-                ("ROW", "BARBELL_ROW", 4, 8, 62.5, 0.01, 0.0),
-                ("PULL_UP", "WIDE_GRIP_LAT_PULLDOWN", 3, 10, 55.0, 0.04, 0.1),
-                ("CURL", "DUMBBELL_CURL", 3, 11, 14.0, 0.03, 0.15),
-                # Rear delts almost never get trained.
-                ("SHOULDER_STABILITY", "CABLE_FACE_PULL", 3, 15, 18.0, 0.02, 0.8),
-            ],
-            "legs": [
-                ("SQUAT", "BARBELL_BACK_SQUAT", 5, 5, 95.0, 0.35, 0.0),
-                ("SQUAT", "LEG_PRESS", 3, 10, 140.0, 0.3, 0.15),
-                ("CALF_RAISE", "STANDING_CALF_RAISE", 3, 15, 60.0, 0.1, 0.35),
-                # Hamstrings are the neglected antagonist.
-                ("LEG_CURL", "SEATED_LEG_CURL", 3, 12, 35.0, 0.03, 0.75),
-            ],
-        }
-
         sets: list[dict[str, Any]] = []
         clock = started
-        for category, name, n_sets, reps, base_kg, per_week, skip in plans[plan]:
+        for category, name, n_sets, reps, base_kg, per_week, skip in LIFT_PLANS[plan]:
             if rng.random() < skip:
                 continue
             weight = base_kg + per_week * week + float(rng.normal(0, 1.0))
@@ -411,6 +534,9 @@ class SampleGarminClient:
             "activityId": activity_id,
             "activityName": f"{plan.title()} Day",
             "activityType": {"typeKey": "strength_training"},
+            # Every session is run against a structured workout, so the muscle
+            # assignments in that definition are available for the analytics.
+            "workoutId": int(WORKOUT_IDS[plan]),
             "startTimeLocal": _iso(started),
             "startTimeGMT": _iso(started),
             "duration": round(duration, 1),

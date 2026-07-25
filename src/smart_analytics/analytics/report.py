@@ -8,6 +8,7 @@ briefing, the model has no business mentioning it.
 
 from __future__ import annotations
 
+import logging
 import sqlite3
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -27,8 +28,11 @@ from . import snapshots as snapshots_mod
 from . import splits as splits_mod
 from . import strength as strength_mod
 from . import zones as zones_mod
+from ..domain import exercises
 from ..domain.muscles import label as muscle_label
 from .findings import Finding, sort_findings, to_records
+
+log = logging.getLogger(__name__)
 
 
 @dataclass
@@ -59,6 +63,7 @@ class TrainingReport:
     progress: pd.DataFrame = field(default_factory=pd.DataFrame)
     patterns: pd.DataFrame = field(default_factory=pd.DataFrame)
     unmapped: pd.DataFrame = field(default_factory=pd.DataFrame)
+    muscle_sources: dict[str, Any] = field(default_factory=dict)
 
     # Cross-discipline
     daily_load: pd.DataFrame = field(default_factory=pd.DataFrame)
@@ -164,6 +169,11 @@ class TrainingReport:
                         ["exercise", "sessions", "current_e1rm", "best_e1rm",
                          "kg_per_month", "pct_per_month", "status"]], limit=14),
                 "movement_patterns": _records(self.patterns, limit=10),
+                "muscle_attribution": (
+                    "Garmin's own muscle assignments from structured workouts, "
+                    "falling back to a curated table where Garmin has none"
+                    if self.muscle_sources.get("garmin_entries")
+                    else "curated exercise → muscle table (no Garmin workout data synced)"),
             }
 
         if self.has_running:
@@ -363,6 +373,32 @@ def _records(frame: pd.DataFrame, limit: int) -> list[dict[str, Any]]:
     return subset.where(pd.notna(subset), None).to_dict("records")
 
 
+def _install_garmin_muscles(conn: sqlite3.Connection) -> dict[str, Any]:
+    """Load synced Garmin muscle assignments and make them the preferred source.
+
+    Returns a diagnostics dict for the data page: how many entries Garmin
+    supplied, and any anatomical names it used that our taxonomy can't express.
+    """
+    try:
+        records = db.load_exercise_muscles(conn)
+    except sqlite3.Error as exc:  # pre-migration database
+        log.debug("no Garmin muscle table yet: %s", exc)
+        records = []
+
+    muscle_map = exercises.GarminMuscleMap(records) if records else None
+    exercises.set_garmin_muscle_map(muscle_map)
+
+    diagnostics: dict[str, Any] = {
+        "garmin_records": len(records),
+        "unmatched_names": {},
+        **exercises.coverage_report(muscle_map),
+    }
+    if muscle_map is not None:
+        diagnostics["unmatched_names"] = dict(
+            sorted(muscle_map.unmatched_names.items(), key=lambda kv: -kv[1])[:20])
+    return diagnostics
+
+
 def build_report(conn: sqlite3.Connection, config: Settings | None = None,
                  lookback_days: int = strength_mod.DEFAULT_LOOKBACK_DAYS,
                  progress_lookback_days: int = 180) -> TrainingReport:
@@ -389,6 +425,10 @@ def build_report(conn: sqlite3.Connection, config: Settings | None = None,
     findings: list[Finding] = []
 
     # --- strength ----------------------------------------------------------
+    # Garmin's own muscle assignments, synced from structured workouts, are
+    # installed before any set is expanded so they take precedence over the
+    # curated fallback table for every exercise Garmin has an opinion about.
+    report.muscle_sources = _install_garmin_muscles(conn)
     report.expanded = strength_mod.expand_sets(sets)
     report.unmapped = strength_mod.unmapped_exercises(sets)
     if not report.expanded.empty:

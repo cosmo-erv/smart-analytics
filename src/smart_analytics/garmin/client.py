@@ -24,6 +24,7 @@ from typing import Any
 
 from ..config import Settings, settings as default_settings
 from . import physiology
+from . import workouts as workouts_mod
 
 log = logging.getLogger(__name__)
 
@@ -99,6 +100,11 @@ class GarminClient:
         self.settings = config or default_settings
         self._mfa_prompt = mfa_prompt
         self._api: Any = None
+        # Opaque state handed back by garminconnect between the two login steps.
+        self._pending_mfa_state: Any = None
+        # Address used for an interactive login, so the UI can name the account
+        # even when nothing was configured in .env.
+        self._login_email: str = ""
 
     # --- auth --------------------------------------------------------------
 
@@ -131,16 +137,104 @@ class GarminClient:
                 prompt_mfa=self._mfa_prompt,
             )
             api.login()
-            self.settings.token_store.mkdir(parents=True, exist_ok=True)
-            api.garth.dump(store)
-            log.info("Authenticated with Garmin; tokens cached in %s", store)
+            self._api = api
+            self._save_tokens()
+        except GarminAuthError:
+            raise
         except GarminConnectAuthenticationError as exc:
             raise GarminAuthError(f"Garmin rejected the login: {exc}") from exc
         except Exception as exc:
             raise GarminAuthError(f"Could not log in to Garmin Connect: {exc}") from exc
 
-        self._api = api
         return self
+
+    # --- interactive login (for the GUI) -----------------------------------
+
+    def begin_login(self, email: str, password: str) -> dict[str, Any]:
+        """Start a login without blocking on an MFA prompt.
+
+        A desktop script can block on ``input()`` for the emailed code, but a web
+        UI can't — so this uses garminconnect's early-return mode: the call comes
+        back with ``mfa_required`` plus the opaque client state, which
+        :meth:`complete_login` hands back along with the code.
+
+        Returns ``{"status": "ok"}`` when no MFA was needed, or
+        ``{"status": "mfa_required"}``.
+        """
+        from garminconnect import Garmin, GarminConnectAuthenticationError
+
+        if not email or not password:
+            raise GarminAuthError("Email and password are both required.")
+
+        self._login_email = email.strip()
+        try:
+            api = Garmin(email=email, password=password, return_on_mfa=True)
+            status, client_state = api.login()
+        except GarminConnectAuthenticationError as exc:
+            raise GarminAuthError(f"Garmin rejected the login: {exc}") from exc
+        except Exception as exc:
+            raise GarminAuthError(f"Could not reach Garmin Connect: {exc}") from exc
+
+        self._api = api
+        if status == "needs_mfa":
+            self._pending_mfa_state = client_state
+            return {"status": "mfa_required"}
+
+        self._pending_mfa_state = None
+        self._save_tokens()
+        return {"status": "ok", "display_name": self.display_name()}
+
+    def complete_login(self, mfa_code: str) -> dict[str, Any]:
+        """Finish a login that needed a multi-factor code."""
+        if self._api is None or self._pending_mfa_state is None:
+            raise GarminAuthError("No login is waiting for a code — start again.")
+        code = (mfa_code or "").strip()
+        if not code:
+            raise GarminAuthError("Enter the code Garmin sent you.")
+
+        try:
+            self._api.resume_login(self._pending_mfa_state, code)
+        except Exception as exc:
+            raise GarminAuthError(
+                f"That code wasn't accepted: {exc}. Codes expire quickly — request a "
+                f"new one and try again."
+            ) from exc
+
+        self._pending_mfa_state = None
+        self._save_tokens()
+        return {"status": "ok", "display_name": self.display_name()}
+
+    @staticmethod
+    def _token_writer(api: Any) -> Any:
+        """The object that can persist OAuth tokens.
+
+        garminconnect exposed the underlying garth session as ``.garth`` in the
+        0.2 line and as ``.client`` from 0.3, and both have ``dump(path)``.
+        """
+        writer = getattr(api, "garth", None) or getattr(api, "client", None)
+        if writer is None or not hasattr(writer, "dump"):
+            raise GarminAuthError(
+                "This version of garminconnect doesn't expose a way to cache tokens; "
+                "pin garminconnect>=0.2.19."
+            )
+        return writer
+
+    def _save_tokens(self) -> None:
+        """Persist OAuth tokens so later syncs don't need the password again."""
+        self.settings.token_store.mkdir(parents=True, exist_ok=True)
+        self._token_writer(self._api).dump(str(self.settings.token_store))
+        log.info("Garmin tokens cached in %s", self.settings.token_store)
+
+    def sign_out(self) -> None:
+        """Delete the cached tokens. The next sync will need a fresh login."""
+        store = self.settings.token_store
+        if store.exists():
+            for path in store.iterdir():
+                if path.is_file():
+                    path.unlink()
+        self._api = None
+        self._pending_mfa_state = None
+        self._login_email = ""
 
     @property
     def api(self) -> Any:
@@ -149,10 +243,11 @@ class GarminClient:
         return self._api
 
     def display_name(self) -> str:
+        fallback = self._login_email or self.settings.garmin_email
         try:
-            return self.api.get_full_name() or self.settings.garmin_email
+            return self.api.get_full_name() or fallback
         except Exception:
-            return self.settings.garmin_email
+            return fallback
 
     # --- activities --------------------------------------------------------
 
@@ -322,6 +417,32 @@ class GarminClient:
     def splits(self, activity_id: str) -> Any:
         return self._try("activity splits", self.api.get_activity_splits, activity_id)
 
+    # --- structured workouts (the source of Garmin's muscle assignments) ----
+
+    def workout_list(self, limit: int = 100) -> list[dict[str, Any]]:
+        payload = self._try("workout list", self.api.get_workouts, 0, limit)
+        return payload if isinstance(payload, list) else []
+
+    def workout(self, workout_id: str) -> Any:
+        return self._try("workout detail", self.api.get_workout_by_id, workout_id)
+
+    def exercise_library(self) -> list[dict[str, Any]]:
+        """Garmin's exercise library, if this account exposes one.
+
+        The library isn't part of garminconnect's documented surface, so each
+        known-plausible path is tried through the generic ``connectapi`` escape
+        hatch. Failure is expected and harmless — the curated mapping covers it.
+        """
+        for path in workouts_mod.EXERCISE_LIBRARY_PATHS:
+            payload = self._try(f"exercise library ({path})", self.api.connectapi, path)
+            if not payload:
+                continue
+            records = workouts_mod.normalise_exercise_library(payload)
+            if records:
+                log.info("Exercise library: %d entries from %s", len(records), path)
+                return records
+        return []
+
 
 # --- normalisation ----------------------------------------------------------
 
@@ -394,6 +515,10 @@ def normalise_activity(raw: dict[str, Any]) -> dict[str, Any] | None:
         "total_volume_kg": None,  # computed from sets during detail sync
         "hr_zone_json": json.dumps(zones) if zones else None,
         "details_fetched": 0,
+        # Links the activity to the structured workout it followed, which is where
+        # Garmin's own exercise and muscle detail lives.
+        "workout_id": (str(_first(raw, "workoutId", "workout_id"))
+                       if _first(raw, "workoutId", "workout_id") else None),
         "raw_json": json.dumps(raw, default=str),
     }
 

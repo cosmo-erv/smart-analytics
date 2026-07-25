@@ -12,10 +12,13 @@ receives *computed metrics only*, never raw activity data.
 
 **Strength — which muscles are falling behind, and why**
 
-Garmin records exercises; it has no concept of muscles. This app supplies that layer:
-30 Garmin exercise categories and 44 named variants mapped to 18 muscles with fractional
-credit (a barbell row gives the upper back a full set and the biceps half of one), then
-scores every muscle 0–100 on four independent signals:
+If you train from a structured workout, Garmin's workout definition already states which
+muscles it assigns to each exercise — so those assignments are synced and used first,
+translated from Garmin's anatomical names (`BICEPS_FEMORIS`, `DELTOID_POSTERIOR`) into an
+18-muscle model. A built-in table of 30 exercise categories and 44 named variants covers
+anything Garmin didn't label. Either way credit is fractional — a barbell row gives the
+upper back a full set and the biceps half of one — and every muscle is scored 0–100 on
+four independent signals:
 
 | Signal | What it measures |
 |---|---|
@@ -84,9 +87,15 @@ find — and runs it through the same normalisation and storage path as a real s
 
 ### Connecting Garmin
 
-Set `GARMIN_EMAIL` and `GARMIN_PASSWORD` in `.env`. The password is used **once** to mint
-OAuth tokens, which are cached in `.garmin_tokens/` (gitignored); later syncs resume from
-those, so MFA is prompted at most once per token lifetime.
+Sign in from the app: **Sync & settings → Garmin Connect account**, enter your email and
+password, and if Garmin asks for a multi-factor code you'll get a second box to enter it.
+Or set `GARMIN_EMAIL` and `GARMIN_PASSWORD` in `.env` if you'd rather not type them each
+time.
+
+Either way the password is used **once**, to mint OAuth tokens, which are cached in
+`.garmin_tokens/` (gitignored). Later syncs resume from those, so MFA is prompted at most
+once per token lifetime. The password is never written to the database, and **Sign out**
+deletes the cached tokens.
 
 Garmin has no public consumer API — the official Developer programme is partner-only — so
 this uses [`garminconnect`](https://github.com/cyberjunky/python-garminconnect), which
@@ -132,11 +141,13 @@ src/smart_analytics/
   garmin/
     client.py                   Garmin Connect client + normalisation
     physiology.py               threshold, zones, readiness, splits, records
+    workouts.py                 structured workouts, Garmin's muscle assignments
     sync.py                     bounded incremental sync
     sample.py                   demo data with planted weaknesses
   domain/
     muscles.py                  18-muscle taxonomy, balance pairs
-    exercises.py                Garmin exercise → muscle mapping
+    exercises.py                exercise → muscle resolution (Garmin first)
+    garmin_muscles.py           Garmin's anatomical names → the 18-muscle model
   analytics/
     strength.py                 volume, e1RM trends, lag detection
     running.py                  pace, efficiency, bests, predictions
@@ -189,6 +200,11 @@ production code rather than a test-only shortcut.
   exercise tracking on. Manually logged sessions carry no set data, so they can't be
   included in the muscle model.
 - No per-side data, so left/right imbalance can't be assessed.
-- Muscle mapping is a curated table, not exhaustive. Unmapped exercises are listed on the
-  Strength page; add them to `NAME_PROFILES` in `domain/exercises.py`.
+- Garmin's muscle assignments only cover exercises that appear in a structured workout (or
+  in the exercise library, where an account exposes one). Anything else falls back to the
+  built-in table, which isn't exhaustive — unmapped exercises are listed on the Strength
+  page; add them to `NAME_PROFILES` in `domain/exercises.py`.
+- Garmin sometimes labels a muscle too coarsely to use — an unqualified `DELTOID` can't be
+  split into front/side/rear, which are separate balance targets — so those names are
+  reported on the Sync page rather than guessed at.
 - Not medical advice.

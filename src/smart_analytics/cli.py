@@ -41,6 +41,7 @@ def _sync(args: argparse.Namespace) -> int:
         fetch_details=not args.no_details,
         detail_batch=args.detail_batch,
         wellness_days=args.wellness_days,
+        fetch_workouts=not args.no_workouts,
         throttle_s=0.0 if args.demo else 0.25,
         progress=progress,
     )
@@ -103,6 +104,8 @@ def main(argv: list[str] | None = None) -> int:
                              help="strength workouts to detail this run (default 150)")
     sync_parser.add_argument("--wellness-days", type=int, default=90,
                              help="days of wellness data to pull (0 to skip)")
+    sync_parser.add_argument("--no-workouts", action="store_true",
+                             help="skip structured workouts and Garmin's muscle assignments")
     sync_parser.set_defaults(func=_sync)
 
     report_parser = subparsers.add_parser("report", help="print findings from the local cache")

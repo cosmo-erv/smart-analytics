@@ -23,6 +23,9 @@ from ..viz.theme import Palette, palette_for
 
 DATA_VERSION_KEY = "data_version"
 DEMO_KEY = "demo_mode"
+LOGIN_CLIENT_KEY = "garmin_login_client"
+LOGIN_STAGE_KEY = "garmin_login_stage"   # "" | "mfa" | "connected"
+LOGIN_NAME_KEY = "garmin_account_name"
 
 
 @st.cache_resource(show_spinner=False)
@@ -89,11 +92,85 @@ def palette() -> Palette:
     return palette_for(detected)
 
 
+# --- Garmin Connect login ---------------------------------------------------
+# The password is used once, to mint OAuth tokens; only those tokens are written
+# to disk (in settings.token_store, gitignored). Nothing is stored in the
+# database, and the password is never held past the login call.
+
+def garmin_login_stage() -> str:
+    if st.session_state.get(LOGIN_STAGE_KEY) == "mfa":
+        return "mfa"
+    return "connected" if settings.has_cached_tokens else ""
+
+
+def garmin_account_name() -> str | None:
+    """The signed-in account, if this session has established one."""
+    return st.session_state.get(LOGIN_NAME_KEY) or None
+
+
+def begin_garmin_login(email: str, password: str) -> dict[str, Any]:
+    """Step one: exchange credentials for tokens, or ask for an MFA code.
+
+    The half-finished client is kept in session state because Garmin's MFA
+    resume needs the same client object, and a Streamlit rerun happens between
+    the two steps.
+    """
+    client = GarminClient()
+    try:
+        result = client.begin_login(email, password)
+    except GarminAuthError as exc:
+        return {"ok": False, "error": str(exc)}
+    except Exception as exc:  # noqa: BLE001 — network, unexpected payload
+        return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
+
+    if result["status"] == "mfa_required":
+        st.session_state[LOGIN_CLIENT_KEY] = client
+        st.session_state[LOGIN_STAGE_KEY] = "mfa"
+        return {"ok": True, "mfa_required": True}
+
+    _finish_login(client, result.get("display_name"))
+    return {"ok": True, "mfa_required": False, "name": garmin_account_name()}
+
+
+def complete_garmin_login(code: str) -> dict[str, Any]:
+    """Step two: hand Garmin the emailed code and cache the resulting tokens."""
+    client = st.session_state.get(LOGIN_CLIENT_KEY)
+    if client is None:
+        st.session_state[LOGIN_STAGE_KEY] = ""
+        return {"ok": False, "error": "That login attempt expired — start again."}
+    try:
+        result = client.complete_login(code)
+    except GarminAuthError as exc:
+        return {"ok": False, "error": str(exc)}
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
+
+    _finish_login(client, result.get("display_name"))
+    return {"ok": True, "name": garmin_account_name()}
+
+
+def _finish_login(client: GarminClient, name: str | None) -> None:
+    st.session_state[LOGIN_STAGE_KEY] = "connected"
+    st.session_state[LOGIN_NAME_KEY] = name or "your Garmin account"
+    st.session_state[DEMO_KEY] = False
+    # Drop the client: the tokens on disk are what later syncs resume from, so
+    # there's no reason to keep a live session (or its credentials) around.
+    st.session_state.pop(LOGIN_CLIENT_KEY, None)
+
+
+def garmin_sign_out() -> None:
+    """Forget the cached tokens. Nothing already synced is affected."""
+    GarminClient().sign_out()
+    for key in (LOGIN_CLIENT_KEY, LOGIN_STAGE_KEY, LOGIN_NAME_KEY):
+        st.session_state.pop(key, None)
+
+
 # --- sync -------------------------------------------------------------------
 
 def run_sync(*, demo: bool, history_days: int, fetch_details: bool, detail_batch: int,
              wellness_days: int, incremental: bool, fetch_splits: bool = True,
-             split_batch: int = 120, physiology_days: int = 21) -> dict[str, Any]:
+             split_batch: int = 120, physiology_days: int = 21,
+             fetch_workouts: bool = True) -> dict[str, Any]:
     """Run a sync with live progress, returning a small result summary."""
     connection = conn()
     since: date | None = incremental_since(connection) if incremental else None
@@ -122,6 +199,7 @@ def run_sync(*, demo: bool, history_days: int, fetch_details: bool, detail_batch
             wellness_days=wellness_days,
             fetch_splits=fetch_splits,
             split_batch=split_batch,
+            fetch_workouts=fetch_workouts,
             physiology_days=physiology_days,
             throttle_s=0.0 if demo else 0.25,
             progress=report_progress,

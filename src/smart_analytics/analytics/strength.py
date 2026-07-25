@@ -630,7 +630,8 @@ def strength_findings(lagging: pd.DataFrame, balance: pd.DataFrame, progress: pd
         for row in stalled.head(4).itertuples():
             findings.append(Finding(
                 area="strength", subject=row.exercise,
-                title=f"{row.exercise} has {row.status}",
+                title=(f"{row.exercise} is regressing" if row.status == "regressing"
+                       else f"{row.exercise} has stalled"),
                 detail=(f"Estimated 1RM {row.pct_per_month:+.1f}%/month "
                         f"({row.kg_per_month:+.1f} kg/month) across {row.sessions} sessions; "
                         f"currently {row.current_e1rm:.0f} kg with a best of {row.best_e1rm:.0f} kg."),

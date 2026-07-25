@@ -7,7 +7,7 @@ import streamlit as st
 from ..config import settings
 from .. import db
 from .pages import coach, data, load, overview, plan, progress, running, strength
-from .state import conn, palette
+from .state import conn, garmin_account_name, palette
 from ..garmin.sync import last_sync_at
 
 PAGE_ICON = "🏃"
@@ -80,7 +80,14 @@ def _sidebar() -> None:
         st.caption(
             ("AI coach: ready" if settings.has_anthropic_key else "AI coach: no API key")
             + "  \n"
-            + ("Garmin: tokens cached" if settings.has_cached_tokens
-               else "Garmin: credentials set" if settings.has_garmin_credentials
-               else "Garmin: demo mode only")
+            + _garmin_status()
         )
+
+
+def _garmin_status() -> str:
+    if settings.has_cached_tokens:
+        name = garmin_account_name()
+        return f"Garmin: signed in{f' as {name}' if name else ''}"
+    if settings.has_garmin_credentials:
+        return "Garmin: credentials set"
+    return "Garmin: not signed in"

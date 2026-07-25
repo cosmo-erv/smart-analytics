@@ -56,6 +56,7 @@ def render() -> None:
         f"set and the biceps half of one.",
         colors,
     )
+    st.caption(_attribution_note(report))
     volume_table = lagging[["muscle_label", "region", "weekly_sets", "pct_of_target",
                             "pct_per_month", "days_since", "verdict"]].rename(columns={
         "muscle_label": "Muscle", "region": "Region", "weekly_sets": "Sets/week",
@@ -130,6 +131,17 @@ def render() -> None:
                 "to include them."
             )
             st.dataframe(report.unmapped, use_container_width=True, hide_index=True)
+
+
+def _attribution_note(report) -> str:
+    """Say where the muscle attribution came from — it drives every number here."""
+    sources = report.muscle_sources or {}
+    named = sources.get("garmin_named") or 0
+    if not sources.get("garmin_entries"):
+        return ("Muscles come from the app's built-in exercise mapping. Sync your structured "
+                "workouts to use Garmin's own assignments instead — see Sync & settings.")
+    return (f"Muscles come from Garmin's own assignments in your structured workouts "
+            f"({named} exercises), with the built-in mapping filling any gaps.")
 
 
 def _tiles(report) -> list[dict]:

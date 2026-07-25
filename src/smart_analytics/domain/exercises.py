@@ -7,6 +7,10 @@ about muscles, so this module supplies that layer.
 
 Resolution order for a set:
 
+0. **Garmin's own muscle data**, when available. Structured workouts and Garmin's
+   exercise library state which muscles each exercise works; that beats anything
+   inferred here, so a :class:`GarminMuscleMap` built from synced data is checked
+   first. An exact exercise-name match wins over a category-level one.
 1. **Name profile** — the most specific matching entry in :data:`NAME_PROFILES`
    (matched on token subset, so ``ROMANIAN_DEADLIFT`` catches
    ``BARBELL_ROMANIAN_DEADLIFT``). More specific keys win.
@@ -202,9 +206,14 @@ class Resolved:
 
     muscles: dict[str, float] = field(default_factory=dict)
     pattern: str = ISOLATION
-    source: str = "unmapped"  # name | category | unmapped | non_loading
+    # garmin_name | garmin_category | name | category | unmapped | non_loading
+    source: str = "unmapped"
     display_name: str = ""
     equipment: str | None = None
+
+    @property
+    def from_garmin(self) -> bool:
+        return self.source.startswith("garmin")
 
     @property
     def is_mapped(self) -> bool:
@@ -228,7 +237,83 @@ def detect_equipment(name: str | None) -> str | None:
     return None
 
 
-def resolve(category: str | None, name: str | None = None) -> Resolved:
+class GarminMuscleMap:
+    """Garmin's own exercise → muscle assignments, keyed for fast lookup.
+
+    Built from synced workout definitions and the exercise library. Lookups try
+    the exact ``(category, name)`` pair first, then the category alone, so a
+    named variant can be more precise than its category default.
+    """
+
+    def __init__(self, records: list[dict[str, Any]] | None = None) -> None:
+        self._by_name: dict[tuple[str, str], dict[str, float]] = {}
+        self._by_category: dict[str, dict[str, float]] = {}
+        self.unmatched_names: dict[str, int] = {}
+        for record in records or []:
+            self.add(record)
+
+    def add(self, record: dict[str, Any]) -> None:
+        from .garmin_muscles import build_profile
+
+        profile, unmatched = build_profile(
+            record.get("primary_muscles"), record.get("secondary_muscles"))
+        for name in unmatched:
+            self.unmatched_names[name] = self.unmatched_names.get(name, 0) + 1
+        if not profile:
+            return
+
+        category = (record.get("category") or "").upper().strip()
+        exercise = (record.get("exercise_name") or "").upper().strip()
+        if exercise:
+            self._by_name[(category, exercise)] = profile
+            # Also key on the name alone: the same exercise can be logged under a
+            # different category than the workout declared it in.
+            self._by_name[("", exercise)] = profile
+        elif category:
+            self._by_category[category] = profile
+
+    def lookup(self, category: str, name: str) -> tuple[dict[str, float], str] | None:
+        for key in ((category, name), ("", name)):
+            if key[1] and key in self._by_name:
+                return self._by_name[key], "garmin_name"
+        if category and category in self._by_category:
+            return self._by_category[category], "garmin_category"
+        return None
+
+    def __len__(self) -> int:
+        """Distinct exercises and categories covered.
+
+        Counted rather than summing the key dicts, because a named exercise is
+        stored under two keys so a category mismatch still resolves.
+        """
+        return len({key[1] for key in self._by_name if key[1]}) + len(self._by_category)
+
+    @property
+    def stats(self) -> dict[str, int]:
+        return {
+            "named_exercises": len({k[1] for k in self._by_name if k[1]}),
+            "categories": len(self._by_category),
+            "unmatched_muscle_names": len(self.unmatched_names),
+        }
+
+
+# Module-level default so callers that don't thread a map through still benefit
+# once one has been installed for the session.
+_ACTIVE_GARMIN_MAP: GarminMuscleMap | None = None
+
+
+def set_garmin_muscle_map(muscle_map: GarminMuscleMap | None) -> None:
+    """Install the Garmin-derived map used by :func:`resolve` when none is passed."""
+    global _ACTIVE_GARMIN_MAP
+    _ACTIVE_GARMIN_MAP = muscle_map
+
+
+def active_garmin_muscle_map() -> GarminMuscleMap | None:
+    return _ACTIVE_GARMIN_MAP
+
+
+def resolve(category: str | None, name: str | None = None,
+            garmin_map: GarminMuscleMap | None = None) -> Resolved:
     """Map a Garmin (category, name) pair to a muscle-activation profile."""
     cat = (category or "").upper().strip()
     display = prettify(name or category)
@@ -236,6 +321,17 @@ def resolve(category: str | None, name: str | None = None) -> Resolved:
 
     if cat in NON_LOADING_CATEGORIES and not name:
         return Resolved(pattern=CONDITIONING, source="non_loading", display_name=display)
+
+    # 0. Garmin's own assignment wins — it knows what the exercise works.
+    #    The movement pattern still comes from our tables, since Garmin doesn't
+    #    classify movements that way.
+    muscle_map = garmin_map if garmin_map is not None else _ACTIVE_GARMIN_MAP
+    if muscle_map is not None:
+        found = muscle_map.lookup(cat, (name or "").upper().strip())
+        if found:
+            profile, source = found
+            return Resolved(dict(profile), _pattern_for(cat, name), source, display,
+                            equipment)
 
     # 1. Most specific name match. Search the name and, failing that, the
     #    category — some Garmin exports put the detail in the category field.
@@ -256,10 +352,29 @@ def resolve(category: str | None, name: str | None = None) -> Resolved:
     return Resolved(source="unmapped", display_name=display, equipment=equipment)
 
 
-def coverage_report() -> dict[str, int]:
+def _pattern_for(category: str, name: str | None) -> str:
+    """Movement pattern from our own tables — Garmin doesn't classify movements."""
+    haystack = _tokens(name) | _tokens(category)
+    for _key, key_tokens, profile in _NAME_KEY_TOKENS:
+        if key_tokens <= haystack:
+            return profile.pattern
+    profile = CATEGORY_PROFILES.get(category)
+    return profile.pattern if profile else ISOLATION
+
+
+def coverage_report(garmin_map: GarminMuscleMap | None = None) -> dict[str, int]:
     """Size of the mapping tables, shown in the app's diagnostics panel."""
-    return {
+    muscle_map = garmin_map if garmin_map is not None else _ACTIVE_GARMIN_MAP
+    report = {
         "categories": len(CATEGORY_PROFILES),
         "named_variants": len(NAME_PROFILES),
         "muscles": len({m for p in CATEGORY_PROFILES.values() for m in p.muscles}),
+        "garmin_entries": 0,
+        "garmin_named": 0,
+        "garmin_categories": 0,
     }
+    if muscle_map is not None:
+        report["garmin_entries"] = len(muscle_map)
+        report["garmin_named"] = muscle_map.stats["named_exercises"]
+        report["garmin_categories"] = muscle_map.stats["categories"]
+    return report

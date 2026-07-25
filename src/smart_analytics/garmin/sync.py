@@ -25,6 +25,7 @@ from .client import (
     normalise_sets,
     normalise_splits,
 )
+from .workouts import muscle_records_from_steps, normalise_workout
 
 log = logging.getLogger(__name__)
 
@@ -32,6 +33,7 @@ ProgressFn = Callable[[str, float], None]
 
 LAST_SYNC_KEY = "last_sync_at"
 LAST_ACTIVITY_DATE_KEY = "last_activity_date"
+EXERCISE_LIBRARY_KEY = "exercise_library_checked"
 
 
 @dataclass
@@ -43,6 +45,8 @@ class SyncReport:
     wellness_days: int = 0
     splits_activities: int = 0
     splits_written: int = 0
+    workouts_written: int = 0
+    muscle_entries: int = 0
     physiology_days: int = 0
     predictions_written: int = 0
     records_written: int = 0
@@ -64,6 +68,10 @@ class SyncReport:
         ]
         if self.splits_written:
             parts.append(f"{self.splits_written} splits from {self.splits_activities} runs")
+        if self.workouts_written:
+            parts.append(f"{self.workouts_written} workouts")
+        if self.muscle_entries:
+            parts.append(f"{self.muscle_entries} Garmin muscle mappings")
         if self.wellness_days:
             parts.append(f"{self.wellness_days} wellness days")
         if self.physiology_days:
@@ -89,6 +97,10 @@ def sync(
     wellness_days: int = 90,
     fetch_splits: bool = True,
     split_batch: int = 120,
+    fetch_workouts: bool = True,
+    workout_list_limit: int = 100,
+    workout_batch: int = 50,
+    fetch_exercise_library: bool = True,
     physiology_days: int = 21,
     max_activities: int | None = None,
     throttle_s: float = 0.25,
@@ -168,6 +180,67 @@ def sync(
             report.splits_activities += 1
             if throttle_s:
                 time.sleep(throttle_s)
+
+    # --- 3b. structured workouts and Garmin's muscle assignments ------------
+    # A strength activity run against a workout links to a definition that names
+    # each exercise and the muscles Garmin assigns it — better than any mapping
+    # we could infer, so it's fetched and stored as the preferred source.
+    if fetch_workouts:
+        progress("Listing structured workouts…", 0.66)
+        # The list endpoint returns summaries only — the step tree, and with it the
+        # muscle assignments, comes from the per-workout detail call. So the list is
+        # used purely to enumerate ids.
+        wanted: list[str] = []
+        try:
+            for raw in client.workout_list(limit=workout_list_limit):
+                workout_id = raw.get("workoutId") or raw.get("id") if isinstance(raw, dict) else None
+                if workout_id is not None:
+                    wanted.append(str(workout_id))
+        except Exception as exc:
+            report.errors.append(f"Workout list: {exc}")
+
+        # Workouts an activity was run against matter most, even if they've since
+        # been deleted from the library and so never appear in the list.
+        for workout_id in db.workout_ids_needing_fetch(conn):
+            if workout_id not in wanted:
+                wanted.insert(0, workout_id)
+
+        already = db.workout_ids_with_steps(conn)
+        pending_workouts = [wid for wid in dict.fromkeys(wanted)
+                            if wid not in already][:workout_batch]
+
+        for position, workout_id in enumerate(pending_workouts, start=1):
+            progress(f"Reading workout {position}/{len(pending_workouts)}…",
+                     0.66 + 0.04 * (position / max(len(pending_workouts), 1)))
+            try:
+                summary, steps = normalise_workout(client.workout(workout_id))
+            except Exception as exc:
+                report.errors.append(f"Workout {workout_id}: {exc}")
+                continue
+            if not summary:
+                continue
+            report.workouts_written += db.upsert_workouts(conn, [summary])
+            db.replace_workout_steps(conn, summary["workout_id"], steps)
+            muscle_rows = muscle_records_from_steps(steps)
+            if muscle_rows:
+                report.muscle_entries += db.upsert_exercise_muscles(conn, muscle_rows)
+            if throttle_s:
+                time.sleep(throttle_s)
+
+        # The exercise library, if this account exposes one, covers exercises that
+        # never appeared in a workout.
+        if fetch_exercise_library and not db.get_state(conn, EXERCISE_LIBRARY_KEY):
+            progress("Checking Garmin's exercise library…", 0.66)
+            try:
+                library = client.exercise_library()
+            except Exception as exc:
+                library = []
+                report.errors.append(f"Exercise library: {exc}")
+            if library:
+                report.muscle_entries += db.upsert_exercise_muscles(conn, library)
+            # Record the attempt either way, so we don't retry every sync.
+            db.set_state(conn, EXERCISE_LIBRARY_KEY,
+                         {"entries": len(library), "checked": True})
 
     # --- 4. Garmin's own physiological metrics ------------------------------
     if physiology_days > 0:
