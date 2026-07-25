@@ -92,6 +92,30 @@ class GarminAuthError(RuntimeError):
     """Login failed — bad credentials, MFA not satisfied, or expired tokens."""
 
 
+# How the account's second factor is delivered. Garmin reports this as
+# ``mfaLastMethodUsed`` on the MFA challenge, and it decides what the UI should
+# tell the user to go and look at — an emailed code and an authenticator code
+# arrive in very different places.
+MFA_EMAIL = "email"
+MFA_SMS = "sms"
+MFA_AUTHENTICATOR = "authenticator"
+MFA_UNKNOWN = "unknown"
+
+
+def normalise_mfa_method(raw: Any) -> str:
+    """Classify Garmin's MFA method string, which isn't a documented enum."""
+    text = str(raw or "").strip().lower()
+    if not text:
+        return MFA_UNKNOWN
+    if "mail" in text:
+        return MFA_EMAIL
+    if "sms" in text or "text" in text or "phone" in text:
+        return MFA_SMS
+    if any(token in text for token in ("auth", "totp", "app", "token")):
+        return MFA_AUTHENTICATOR
+    return MFA_UNKNOWN
+
+
 class GarminClient:
     """Thin, normalising wrapper around ``garminconnect.Garmin``."""
 
@@ -101,7 +125,10 @@ class GarminClient:
         self._mfa_prompt = mfa_prompt
         self._api: Any = None
         # Opaque state handed back by garminconnect between the two login steps.
+        # It is None in current versions, so a separate flag records that a login
+        # is waiting on a code.
         self._pending_mfa_state: Any = None
+        self._mfa_pending = False
         # Address used for an interactive login, so the UI can name the account
         # even when nothing was configured in .env.
         self._login_email: str = ""
@@ -159,7 +186,8 @@ class GarminClient:
         :meth:`complete_login` hands back along with the code.
 
         Returns ``{"status": "ok"}`` when no MFA was needed, or
-        ``{"status": "mfa_required"}``.
+        ``{"status": "mfa_required", "method": ...}`` — the method being where the
+        code will turn up, so the UI can point at the right place.
         """
         from garminconnect import Garmin, GarminConnectAuthenticationError
 
@@ -177,16 +205,26 @@ class GarminClient:
 
         self._api = api
         if status == "needs_mfa":
+            # The opaque state is None in current garminconnect — the challenge
+            # is held on the client itself — so a separate flag tracks that a
+            # login is mid-flight rather than testing the state for truthiness.
             self._pending_mfa_state = client_state
-            return {"status": "mfa_required"}
+            self._mfa_pending = True
+            return {"status": "mfa_required", "method": self.mfa_method()}
 
         self._pending_mfa_state = None
+        self._mfa_pending = False
         self._save_tokens()
         return {"status": "ok", "display_name": self.display_name()}
 
+    def mfa_method(self) -> str:
+        """Where this account's second factor is delivered, if Garmin said."""
+        holder = getattr(self._api, "client", None) or self._api
+        return normalise_mfa_method(getattr(holder, "_mfa_method", None))
+
     def complete_login(self, mfa_code: str) -> dict[str, Any]:
         """Finish a login that needed a multi-factor code."""
-        if self._api is None or self._pending_mfa_state is None:
+        if self._api is None or not self._mfa_pending:
             raise GarminAuthError("No login is waiting for a code — start again.")
         code = (mfa_code or "").strip()
         if not code:
@@ -201,6 +239,7 @@ class GarminClient:
             ) from exc
 
         self._pending_mfa_state = None
+        self._mfa_pending = False
         self._save_tokens()
         return {"status": "ok", "display_name": self.display_name()}
 
@@ -234,6 +273,7 @@ class GarminClient:
                     path.unlink()
         self._api = None
         self._pending_mfa_state = None
+        self._mfa_pending = False
         self._login_email = ""
 
     @property

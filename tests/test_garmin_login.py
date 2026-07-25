@@ -35,9 +35,15 @@ class FakeTokenStore:
 
 
 class FakeGarmin:
-    """Mimics garminconnect's early-return MFA contract."""
+    """Mimics garminconnect's early-return MFA contract.
+
+    Note the ``(status, None)`` return on an MFA challenge: current garminconnect
+    keeps the challenge on the client and hands back no state at all, so a
+    two-step flow must not treat that None as "no login in progress".
+    """
 
     instances: list["FakeGarmin"] = []
+    mfa_method = "email"
 
     def __init__(self, email: str | None = None, password: str | None = None,
                  return_on_mfa: bool = False, **_: Any) -> None:
@@ -52,7 +58,8 @@ class FakeGarmin:
         if self.password == "wrong":
             raise garminconnect.GarminConnectAuthenticationError("bad credentials")
         if self.password == MFA_PASSWORD:
-            return "needs_mfa", {"opaque": "client-state"}
+            self.client._mfa_method = type(self).mfa_method
+            return "needs_mfa", None
         return None, None
 
     def resume_login(self, client_state: Any, mfa_code: str) -> tuple[Any, Any]:
@@ -89,14 +96,14 @@ def test_login_without_mfa_caches_tokens_immediately(client):
 def test_mfa_login_needs_a_code_before_anything_is_written(client):
     result = client.begin_login("athlete@example.com", MFA_PASSWORD)
 
-    assert result == {"status": "mfa_required"}
+    assert result == {"status": "mfa_required", "method": "email"}
     # Nothing is cached until the second factor is satisfied.
     assert not client.settings.has_cached_tokens
 
     finished = client.complete_login(GOOD_CODE)
     assert finished["status"] == "ok"
     assert client.settings.has_cached_tokens
-    assert FakeGarmin.instances[-1].resumed_with == ({"opaque": "client-state"}, GOOD_CODE)
+    assert FakeGarmin.instances[-1].resumed_with == (None, GOOD_CODE)
 
 
 def test_a_rejected_code_is_recoverable_rather_than_fatal(client):
@@ -107,6 +114,42 @@ def test_a_rejected_code_is_recoverable_rather_than_fatal(client):
     assert not client.settings.has_cached_tokens
 
     # The pending login is still usable, so the user can just retype the code.
+    assert client.complete_login(GOOD_CODE)["status"] == "ok"
+
+
+def test_a_null_client_state_still_counts_as_a_login_in_progress(client):
+    """Regression: garminconnect returns no state, keeping it on the client.
+
+    Gating the second step on that state being truthy made every real MFA login
+    fail with "no login is waiting for a code".
+    """
+    client.begin_login("athlete@example.com", MFA_PASSWORD)
+    assert client._pending_mfa_state is None      # what garminconnect handed back
+    assert client.complete_login(GOOD_CODE)["status"] == "ok"
+
+
+@pytest.mark.parametrize("reported, expected", [
+    ("email", "email"),
+    ("EMAIL", "email"),
+    ("sms", "sms"),
+    ("text_message", "sms"),
+    ("authenticator", "authenticator"),
+    ("TOTP", "authenticator"),
+    ("google_authenticator_app", "authenticator"),
+    ("something_new", "unknown"),
+    (None, "unknown"),
+])
+def test_the_delivery_method_is_reported_so_the_ui_can_point_at_it(
+        client, monkeypatch, reported, expected):
+    """An emailed code and an authenticator code arrive in different places."""
+    monkeypatch.setattr(FakeGarmin, "mfa_method", reported)
+    result = client.begin_login("athlete@example.com", MFA_PASSWORD)
+    assert result["method"] == expected
+
+
+def test_an_unreported_method_does_not_break_the_login(client, monkeypatch):
+    monkeypatch.setattr(FakeGarmin, "mfa_method", None)
+    assert client.begin_login("athlete@example.com", MFA_PASSWORD)["status"] == "mfa_required"
     assert client.complete_login(GOOD_CODE)["status"] == "ok"
 
 

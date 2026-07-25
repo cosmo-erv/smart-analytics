@@ -18,6 +18,7 @@ from ..analytics import TrainingReport, build_report
 from ..analytics import snapshots
 from ..config import Settings, settings
 from ..garmin import GarminAuthError, GarminClient, SampleGarminClient, sync
+from ..garmin.client import MFA_UNKNOWN
 from ..garmin.sync import incremental_since
 from ..viz.theme import Palette, palette_for
 
@@ -26,6 +27,7 @@ DEMO_KEY = "demo_mode"
 LOGIN_CLIENT_KEY = "garmin_login_client"
 LOGIN_STAGE_KEY = "garmin_login_stage"   # "" | "mfa" | "connected"
 LOGIN_NAME_KEY = "garmin_account_name"
+LOGIN_MFA_METHOD_KEY = "garmin_mfa_method"
 
 
 @st.cache_resource(show_spinner=False)
@@ -108,6 +110,11 @@ def garmin_account_name() -> str | None:
     return st.session_state.get(LOGIN_NAME_KEY) or None
 
 
+def garmin_mfa_method() -> str:
+    """How Garmin said it would deliver the code for the pending login."""
+    return st.session_state.get(LOGIN_MFA_METHOD_KEY) or MFA_UNKNOWN
+
+
 def begin_garmin_login(email: str, password: str) -> dict[str, Any]:
     """Step one: exchange credentials for tokens, or ask for an MFA code.
 
@@ -126,7 +133,8 @@ def begin_garmin_login(email: str, password: str) -> dict[str, Any]:
     if result["status"] == "mfa_required":
         st.session_state[LOGIN_CLIENT_KEY] = client
         st.session_state[LOGIN_STAGE_KEY] = "mfa"
-        return {"ok": True, "mfa_required": True}
+        st.session_state[LOGIN_MFA_METHOD_KEY] = result.get("method")
+        return {"ok": True, "mfa_required": True, "method": result.get("method")}
 
     _finish_login(client, result.get("display_name"))
     return {"ok": True, "mfa_required": False, "name": garmin_account_name()}
@@ -161,7 +169,8 @@ def _finish_login(client: GarminClient, name: str | None) -> None:
 def garmin_sign_out() -> None:
     """Forget the cached tokens. Nothing already synced is affected."""
     GarminClient().sign_out()
-    for key in (LOGIN_CLIENT_KEY, LOGIN_STAGE_KEY, LOGIN_NAME_KEY):
+    for key in (LOGIN_CLIENT_KEY, LOGIN_STAGE_KEY, LOGIN_NAME_KEY,
+                LOGIN_MFA_METHOD_KEY):
         st.session_state.pop(key, None)
 
 

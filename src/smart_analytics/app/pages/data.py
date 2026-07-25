@@ -9,6 +9,7 @@ from ... import db
 from ...config import settings
 from ...domain.exercises import coverage_report
 from ...domain.garmin_muscles import unmappable_reason
+from ...garmin.client import MFA_AUTHENTICATOR, MFA_EMAIL, MFA_SMS, MFA_UNKNOWN
 from ...garmin.sync import last_sync_at
 from .. import components as ui
 from ..state import (
@@ -19,6 +20,7 @@ from ..state import (
     current_report,
     garmin_account_name,
     garmin_login_stage,
+    garmin_mfa_method,
     garmin_sign_out,
     palette,
     run_sync,
@@ -69,6 +71,16 @@ def render() -> None:
     _maintenance(connection, colors)
 
 
+_MFA_PROMPTS: dict[str, str] = {
+    MFA_EMAIL: "Garmin emailed you a verification code. Enter it to finish signing in.",
+    MFA_SMS: "Garmin texted you a verification code. Enter it to finish signing in.",
+    MFA_AUTHENTICATOR: ("Your account uses an authenticator app — no email or text is "
+                        "sent. Open the app and enter the current code for Garmin."),
+    MFA_UNKNOWN: ("Garmin wants a verification code, but didn't say how it sent it — check "
+                  "your email, your texts, and your authenticator app if you use one."),
+}
+
+
 def _garmin_account(colors) -> None:
     ui.section("Garmin Connect account", None, colors)
     stage = garmin_login_stage()
@@ -88,7 +100,15 @@ def _garmin_account(colors) -> None:
         return
 
     if stage == "mfa":
-        st.info("Garmin sent a verification code to your email. Enter it to finish signing in.")
+        method = garmin_mfa_method()
+        st.info(_MFA_PROMPTS.get(method, _MFA_PROMPTS[MFA_UNKNOWN]))
+        if method != MFA_AUTHENTICATOR:
+            st.caption(
+                "No code arriving? Check your spam folder, and check which method your "
+                "account actually uses at Garmin Connect → **Account settings → Sign-in & "
+                "security → Multi-factor authentication**. If it's set to an authenticator "
+                "app, no email or text is sent — take the code from the app."
+            )
         with st.form("garmin_mfa"):
             code = st.text_input("Verification code", max_chars=12,
                                  help="Codes expire quickly — request a new one if it's stale.")
@@ -99,7 +119,8 @@ def _garmin_account(colors) -> None:
                 st.rerun()
             else:
                 st.error(result["error"])
-        if st.button("Cancel", type="secondary"):
+        # Garmin has no resend endpoint — a new code means a new login attempt.
+        if st.button("Start over (requests a new code)", type="secondary"):
             garmin_sign_out()
             st.rerun()
         return
