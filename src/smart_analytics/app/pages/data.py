@@ -98,10 +98,12 @@ def _no_code_help() -> None:
             "isn't necessarily the address you typed here.\n"
             "3. **Confirm the method** at Garmin Connect → Account settings → Sign-in & "
             "security → Multi-factor authentication. An authenticator app sends nothing.\n"
-            "4. **Still nothing?** Turn MFA off in those same Garmin settings, sign in here "
-            "once, then turn it back on. The sign-in caches OAuth tokens, and those keep "
-            "working with MFA re-enabled — so this is a one-time step, not a permanent "
-            "downgrade of your account security."
+            "4. **Wait, then try once.** Garmin throttles repeated MFA attempts, so a burst "
+            "of retries can stop codes arriving entirely. Give it 30 minutes and make a "
+            "single attempt.\n"
+            "5. **Check whether it's us or Garmin:** sign in at connect.garmin.com in a "
+            "browser. If no code arrives there either, the problem is on Garmin's side or "
+            "at your mail provider, and nothing in this app can route around it."
         )
         flow, web_flow = garmin_mfa_flow(), garmin_web_flow_note()
         if flow or web_flow:

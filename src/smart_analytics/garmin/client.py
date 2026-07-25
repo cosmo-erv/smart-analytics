@@ -239,11 +239,12 @@ class GarminClient:
                         password: str) -> tuple[Any, Any]:
         """Try Garmin's browser sign-in form, returning garminconnect's contract.
 
-        garminconnect tries a mobile JSON login first, and that one *reports* an
-        MFA challenge without Garmin ever sending a code: dispatching it needs a
-        request the library has no code for (it only ever verifies a code, never
-        asks for one). The browser form is the flow Garmin's own website uses, so
-        the challenge it raises is the one that comes with an email.
+        garminconnect tries a mobile JSON login first. Neither it nor ``garth``
+        ever *requests* a code — both only verify one — which means Garmin
+        dispatches on the login itself, and the flow probably doesn't decide
+        whether an email goes out. This preference is kept because the browser
+        form is what Garmin's own site does, so it's the better-trodden path; it
+        is **not** a known fix for a code that never arrives.
 
         Returns ``_FALL_BACK`` as the status if the web form isn't usable, so the
         caller runs the normal strategy chain and behaviour is unchanged. Only a

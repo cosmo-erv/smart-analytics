@@ -97,13 +97,18 @@ Either way the password is used **once**, to mint OAuth tokens, which are cached
 once per token lifetime. The password is never written to the database, and **Sign out**
 deletes the cached tokens.
 
-**If a verification code never arrives:** Garmin only dispatches an emailed code for its
-browser sign-in flow, so the login runs that flow first — `garminconnect`'s default is a
-mobile API login, which reports the MFA challenge without a code ever being sent. If your
-account uses an authenticator app, nothing is emailed at all and the prompt says so. The
-panel's **"The code hasn't arrived"** section lists the rest, including the reliable
-fallback: turn MFA off in Garmin's settings, sign in once, turn it back on — the cached
-tokens keep working, so it's a one-time step.
+**If a verification code never arrives:** the login prefers Garmin's browser sign-in form
+over the mobile API login, on the theory that only the former dispatches a code. That
+theory is unproven — `garth`, the reference implementation, verifies codes without ever
+requesting one, which suggests Garmin dispatches on the login itself and the flow doesn't
+matter. The preference is kept because it mirrors what a browser does, not because it's
+known to fix anything.
+
+What is known: if your account uses an authenticator app, nothing is emailed at all and
+the prompt says so; and Garmin throttles repeated MFA attempts, so a burst of retries can
+stop codes arriving. The panel's **"The code hasn't arrived"** section reports which flow
+raised the challenge and whether the browser form was actually used, which is the evidence
+worth having before theorising further.
 
 Garmin has no public consumer API — the official Developer programme is partner-only — so
 this uses [`garminconnect`](https://github.com/cyberjunky/python-garminconnect), which
