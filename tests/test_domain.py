@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+import numpy as np
+import pandas as pd
+import pytest
+
 from smart_analytics.domain import exercises as ex
 from smart_analytics.domain.muscles import MUSCLE_IDS, label, region_of
 
@@ -80,3 +84,52 @@ def test_labels_and_regions_resolve():
     assert label("rear_delts") == "Rear delts"
     assert region_of("quads") == "legs"
     assert label("not_a_muscle") == "Not A Muscle"  # falls back, doesn't raise
+
+
+# --- missing values off a DataFrame -----------------------------------------
+# Real Garmin data contains sets with no exercise recorded. pandas represents
+# those as float('nan'), which is *truthy* — so `name or category` passed the NaN
+# straight through and every string operation downstream blew up.
+
+@pytest.mark.parametrize("category, name", [
+    (float("nan"), float("nan")),
+    ("BENCH_PRESS", float("nan")),
+    (float("nan"), "BARBELL_ROW"),
+    (np.nan, np.nan),
+    (pd.NA, pd.NA),
+    (None, None),
+    ("", ""),
+    ("nan", "nan"),
+])
+def test_resolve_survives_missing_names(category, name):
+    resolved = ex.resolve(category, name)
+    assert isinstance(resolved.display_name, str)
+    assert isinstance(resolved.pattern, str)
+    assert isinstance(resolved.muscles, dict)
+
+
+def test_a_known_category_still_resolves_when_the_name_is_missing():
+    """Losing the name must not lose the set — the category still carries volume."""
+    resolved = ex.resolve("BENCH_PRESS", float("nan"))
+    assert resolved.source == "category"
+    assert resolved.muscles["chest"] == pytest.approx(1.0)
+    assert resolved.display_name == "Bench Press"
+
+
+@pytest.mark.parametrize("value", [float("nan"), np.nan, pd.NA, None, "", "  ", "NaN", "<NA>"])
+def test_missing_values_prettify_to_a_placeholder(value):
+    assert ex.prettify(value) == "Unknown exercise"
+
+
+@pytest.mark.parametrize("value", [float("nan"), pd.NA, None])
+def test_equipment_detection_survives_missing_names(value):
+    assert ex.detect_equipment(value) is None
+
+
+def test_the_garmin_map_ignores_entries_with_missing_keys():
+    muscle_map = ex.GarminMuscleMap([
+        {"category": float("nan"), "exercise_name": float("nan"),
+         "primary_muscles": ["PECTORALIS_MAJOR"], "secondary_muscles": []},
+    ])
+    assert len(muscle_map) == 0
+    assert muscle_map.lookup(float("nan"), float("nan")) is None

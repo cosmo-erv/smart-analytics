@@ -258,3 +258,30 @@ def test_digest_escapes_user_supplied_text(empty_db, report):
     injected = build_report(empty_db)
     html = weekly_digest_html(injected)
     assert "<script>" not in html
+
+
+def test_the_report_survives_sets_with_no_exercise_recorded(tmp_path):
+    """Garmin logs sets it couldn't identify; they must not take the app down.
+
+    Reported from real data as `AttributeError: 'float' object has no attribute
+    'replace'` — the NULL comes back from SQLite as NaN, which is truthy.
+    """
+    conn = db.connect(tmp_path / "nan.db")
+    sync(conn, SampleGarminClient(days=60, seed=2), history_days=60, wellness_days=0,
+         physiology_days=0, split_batch=0, throttle_s=0.0)
+    conn.execute("UPDATE strength_sets SET exercise_name = NULL WHERE rowid % 3 = 0")
+    conn.execute("UPDATE strength_sets SET category = NULL, exercise_name = NULL "
+                 "WHERE rowid % 7 = 0")
+    conn.commit()
+
+    sets = db.load_strength_sets(conn)
+    assert sets["exercise_name"].isna().any()      # the fixture is doing its job
+
+    report = build_report(conn)
+
+    assert report.has_strength
+    assert not report.expanded.empty
+    # Sets that still have a category keep contributing volume.
+    assert report.muscle_volume["weekly_sets"].sum() > 0
+    json.dumps(report.briefing())                  # still valid JSON
+    conn.close()

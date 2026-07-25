@@ -187,7 +187,30 @@ EQUIPMENT_TOKENS = [
 _TOKEN_SPLIT = re.compile(r"[^A-Z0-9]+")
 
 
-def _tokens(text: str | None) -> set[str]:
+def clean_label(value: Any) -> str:
+    """Coerce a category or exercise name to a usable string, or ``""``.
+
+    Real Garmin data has sets with no exercise recorded, and pandas represents a
+    missing value in an otherwise-text column as ``float('nan')`` — which is
+    *truthy*, so ``name or category`` happily passes it on and everything
+    downstream explodes on ``.replace``. Anything that isn't a non-empty string
+    becomes an empty string here, once, at the edge.
+    """
+    if value is None or isinstance(value, float):   # float covers NaN
+        return ""
+    try:
+        if value != value:                          # any other NaN-alike
+            return ""
+    except TypeError:                               # pandas NA: not comparable
+        return ""
+    if not isinstance(value, str):
+        value = str(value)
+    text = value.strip()
+    return "" if text.lower() in {"", "nan", "none", "null", "<na>"} else text
+
+
+def _tokens(text: Any) -> set[str]:
+    text = clean_label(text)
     if not text:
         return set()
     return {t for t in _TOKEN_SPLIT.split(text.upper()) if t}
@@ -223,13 +246,14 @@ class Resolved:
         return [m for m, w in self.muscles.items() if w >= 1.0]
 
 
-def prettify(name: str | None) -> str:
-    if not name:
+def prettify(name: Any) -> str:
+    text = clean_label(name)
+    if not text:
         return "Unknown exercise"
-    return name.replace("_", " ").title()
+    return text.replace("_", " ").title()
 
 
-def detect_equipment(name: str | None) -> str | None:
+def detect_equipment(name: Any) -> str | None:
     toks = _tokens(name)
     for eq in EQUIPMENT_TOKENS:
         if _tokens(eq) <= toks:
@@ -262,8 +286,8 @@ class GarminMuscleMap:
         if not profile:
             return
 
-        category = (record.get("category") or "").upper().strip()
-        exercise = (record.get("exercise_name") or "").upper().strip()
+        category = clean_label(record.get("category")).upper()
+        exercise = clean_label(record.get("exercise_name")).upper()
         if exercise:
             self._by_name[(category, exercise)] = profile
             # Also key on the name alone: the same exercise can be logged under a
@@ -272,7 +296,8 @@ class GarminMuscleMap:
         elif category:
             self._by_category[category] = profile
 
-    def lookup(self, category: str, name: str) -> tuple[dict[str, float], str] | None:
+    def lookup(self, category: Any, name: Any) -> tuple[dict[str, float], str] | None:
+        category, name = clean_label(category).upper(), clean_label(name).upper()
         for key in ((category, name), ("", name)):
             if key[1] and key in self._by_name:
                 return self._by_name[key], "garmin_name"
@@ -312,10 +337,16 @@ def active_garmin_muscle_map() -> GarminMuscleMap | None:
     return _ACTIVE_GARMIN_MAP
 
 
-def resolve(category: str | None, name: str | None = None,
+def resolve(category: Any = None, name: Any = None,
             garmin_map: GarminMuscleMap | None = None) -> Resolved:
-    """Map a Garmin (category, name) pair to a muscle-activation profile."""
-    cat = (category or "").upper().strip()
+    """Map a Garmin (category, name) pair to a muscle-activation profile.
+
+    Both inputs are cleaned first: they come straight off a DataFrame column, so
+    a set logged without an exercise arrives as NaN rather than None.
+    """
+    category = clean_label(category)
+    name = clean_label(name)
+    cat = category.upper()
     display = prettify(name or category)
     equipment = detect_equipment(name)
 
