@@ -40,8 +40,10 @@ def render() -> None:
 
     if not settings.has_ai_key:
         st.info(
-            "No `ANTHROPIC_API_KEY` or `OPENAI_API_KEY` found in `.env`. Showing the "
-            "rule-based summary instead — "
+            "No AI key found in `.env`, so this is the rule-based summary. Every other "
+            "page is unaffected — the metrics are all computed locally. For the "
+            "narrative layer, add a key, or run a model locally for free by "
+            "pointing `OPENAI_BASE_URL` at Ollama or LM Studio — "
             "all metrics and findings are still computed, you just don't get the narrative "
             "layer that weighs them against each other."
         )
@@ -56,7 +58,8 @@ def render() -> None:
             st.rerun()
     with controls[2]:
         if settings.has_ai_key:
-            st.caption(f"Model: `{settings.active_model}` ({settings.provider})")
+            st.caption(f"Model: `{settings.active_model}` "
+                   f"({'local' if settings.is_local_ai else settings.provider})")
 
     stale = st.session_state.get(REPORT_VERSION_KEY) != data_version()
     if REPORT_KEY in st.session_state and stale:

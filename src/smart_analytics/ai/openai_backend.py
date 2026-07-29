@@ -30,10 +30,17 @@ class OpenAIUnavailable(RuntimeError):
 
 
 def client(config: Settings):
+    """An OpenAI client, or one pointed at a local OpenAI-compatible server.
+
+    ``OPENAI_BASE_URL`` covers Ollama, LM Studio and llama.cpp, all of which speak
+    this API — which means the coaching layer can run locally, for free, with no
+    account. Those servers ignore the key, so a placeholder is sent when none is
+    configured rather than refusing the request for a credential nothing checks.
+    """
     if not config.has_openai_key:
         raise OpenAIUnavailable(
-            "No OPENAI_API_KEY set. The analytics still work — add a key to .env "
-            "to enable the coaching narrative."
+            "No OPENAI_API_KEY or OPENAI_BASE_URL set. The analytics still work — add "
+            "a key, or point OPENAI_BASE_URL at a local model, for the coaching narrative."
         )
     try:
         import openai
@@ -42,7 +49,11 @@ def client(config: Settings):
             "The `openai` package isn't installed. Run `pip install -e \".[dev]\"` "
             "again, or `pip install openai`."
         ) from exc
-    return openai.OpenAI(api_key=config.openai_api_key)
+
+    kwargs: dict[str, Any] = {"api_key": config.openai_api_key or "not-needed-locally"}
+    if config.openai_base_url:
+        kwargs["base_url"] = config.openai_base_url
+    return openai.OpenAI(**kwargs)
 
 
 def _messages(system: str, briefing: dict[str, Any], instruction: str) -> list[dict[str, str]]:
@@ -73,20 +84,52 @@ def _usage_of(response) -> dict[str, Any]:
     }
 
 
+def _unsupported_format(exc: Exception) -> bool:
+    """Whether a failure looks like "this server can't do json_schema".
+
+    Local servers implement varying slices of the API, and a rejected
+    ``response_format`` is worth retrying differently rather than surfacing — but
+    a rate limit or a bad key is not, so the match stays narrow.
+    """
+    text = str(exc).lower()
+    return (("response_format" in text or "json_schema" in text or "strict" in text)
+            and ("support" in text or "invalid" in text or "unknown" in text
+                 or "unexpected" in text))
+
+
 def coach_json(config: Settings, *, system: str, briefing: dict[str, Any],
                instruction: str, schema: dict[str, Any],
                max_tokens: int) -> tuple[dict[str, Any], str, dict[str, Any]]:
     """Return ``(payload, model, usage)`` for a schema-constrained coaching call."""
     api = client(config)
-    response = api.chat.completions.create(
-        model=config.openai_model,
-        max_completion_tokens=max_tokens,
-        messages=_messages(system, briefing, instruction),
-        response_format={
+    messages = _messages(system, briefing, instruction)
+
+    def send(response_format: dict[str, Any], extra: list[dict[str, str]] | None = None):
+        return api.chat.completions.create(
+            model=config.openai_model,
+            max_completion_tokens=max_tokens,
+            messages=messages + (extra or []),
+            response_format=response_format,
+        )
+
+    try:
+        response = send({
             "type": "json_schema",
             "json_schema": {"name": "coach_report", "strict": True, "schema": schema},
-        },
-    )
+        })
+    except Exception as exc:
+        if not _unsupported_format(exc):
+            raise
+        # No schema enforcement available, so the shape has to be asked for in
+        # words. Less reliable than strict mode, which is why it's the fallback.
+        log.info("Server rejected json_schema (%s); retrying as plain JSON", exc)
+        response = send(
+            {"type": "json_object"},
+            [{"role": "user",
+              "content": ("Reply with JSON only, conforming exactly to this schema — "
+                          "every listed property is required:\n\n"
+                          + json.dumps(schema, indent=2))}],
+        )
 
     message = response.choices[0].message
     if getattr(message, "refusal", None):
