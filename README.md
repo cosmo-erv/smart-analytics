@@ -123,14 +123,40 @@ speaks the same OAuth flow as the mobile app. Two consequences worth knowing:
 
 ### The AI coach
 
-Set **either** `ANTHROPIC_API_KEY` or `OPENAI_API_KEY` in `.env`. Whichever key is
-present gets used; if both are, `AI_PROVIDER=openai` (or `anthropic`) picks one. Without
-any key everything still works — you get the rule-based summary instead of the narrative
-layer.
+**The coach is optional and off by default.** Every metric in the app is computed
+locally — muscle balance, pace zones, decoupling, load, the recommendation, the digest.
+With no key you get the rule-based summary on the Coach page and everything else is
+untouched. No account, no credits, no calls leaving your machine.
 
-The model is configurable per provider: `SMART_ANALYTICS_MODEL` (default
-`claude-opus-5`) and `OPENAI_MODEL` (default `gpt-4.1`). Any OpenAI model supporting
-structured outputs works — set it to whatever your account can reach.
+Three ways to enable the narrative layer:
+
+| | Set in `.env` | Cost |
+|---|---|---|
+| Anthropic | `ANTHROPIC_API_KEY` | paid API credits |
+| OpenAI | `OPENAI_API_KEY` | paid API credits |
+| **A local model** | `OPENAI_BASE_URL` | **free** |
+
+The local option is anything speaking the OpenAI API — [Ollama](https://ollama.com),
+LM Studio, llama.cpp — so the coaching layer runs on your own machine at no cost and with
+no account:
+
+```bash
+ollama pull llama3.1        # once
+ollama serve
+```
+
+```
+OPENAI_BASE_URL=http://localhost:11434/v1
+OPENAI_MODEL=llama3.1
+```
+
+The key is ignored by those servers and can stay empty. Where a local server can't do
+schema-constrained output, the request retries as plain JSON with the schema described in
+the prompt — less reliable than strict mode, but it works.
+
+Whichever key is present gets used; if several are, `AI_PROVIDER=openai` (or `anthropic`)
+picks one. Models are set per provider with `SMART_ANALYTICS_MODEL` (default
+`claude-opus-5`) and `OPENAI_MODEL` (default `gpt-4.1`).
 
 The design rule is that **the model never computes numbers**. The analytics engines do
 all the arithmetic and hand over a compact JSON briefing; the model's job is to interpret

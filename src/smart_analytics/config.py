@@ -39,6 +39,9 @@ class Settings:
     model: str = "claude-opus-5"
     openai_api_key: str = ""
     openai_model: str = "gpt-4.1"
+    # Point at any OpenAI-compatible server — Ollama, LM Studio, llama.cpp — to run
+    # a model locally for free instead of paying for API credits.
+    openai_base_url: str = ""
     # "auto" picks whichever provider has a key; set explicitly to force one.
     ai_provider: str = "auto"
     max_hr: int | None = None
@@ -57,6 +60,7 @@ class Settings:
             model=os.getenv("SMART_ANALYTICS_MODEL", "").strip() or "claude-opus-5",
             openai_api_key=os.getenv("OPENAI_API_KEY", "").strip(),
             openai_model=os.getenv("OPENAI_MODEL", "").strip() or "gpt-4.1",
+            openai_base_url=os.getenv("OPENAI_BASE_URL", "").strip(),
             ai_provider=os.getenv("AI_PROVIDER", "").strip().lower() or "auto",
             max_hr=_int_or_none("MAX_HR"),
             resting_hr=_int_or_none("RESTING_HR"),
@@ -78,7 +82,16 @@ class Settings:
 
     @property
     def has_openai_key(self) -> bool:
-        return bool(self.openai_api_key)
+        """Usable via the OpenAI path.
+
+        A local server needs no real key — Ollama and LM Studio accept anything —
+        so a base URL on its own is enough to count as configured.
+        """
+        return bool(self.openai_api_key or self.openai_base_url)
+
+    @property
+    def is_local_ai(self) -> bool:
+        return bool(self.openai_base_url)
 
     @property
     def provider(self) -> str:

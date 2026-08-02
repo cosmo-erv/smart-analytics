@@ -222,3 +222,102 @@ def test_the_fallback_summary_names_both_providers():
     assert report.source == "rules"
     assert "ANTHROPIC_API_KEY" in report.assessment
     assert "OPENAI_API_KEY" in report.assessment
+
+
+# --- running a model locally, for free --------------------------------------
+
+def test_a_base_url_alone_is_enough_to_be_configured():
+    """Ollama and LM Studio ignore the key, so requiring one would block them."""
+    config = Settings(openai_base_url="http://localhost:11434/v1")
+    assert config.has_openai_key
+    assert config.provider == "openai"
+    assert config.is_local_ai
+
+
+def test_a_plain_key_is_not_treated_as_local():
+    config = Settings(openai_api_key="sk-oai")
+    assert config.provider == "openai"
+    assert not config.is_local_ai
+
+
+def test_the_local_server_gets_the_base_url_and_a_placeholder_key(monkeypatch):
+    captured: dict[str, Any] = {}
+
+    class FakeOpenAI:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+    monkeypatch.setitem(__import__("sys").modules, "openai",
+                        type("Mod", (), {"OpenAI": FakeOpenAI}))
+    openai_backend.client(Settings(openai_base_url="http://localhost:11434/v1",
+                                   openai_model="llama3.1"))
+
+    assert captured["base_url"] == "http://localhost:11434/v1"
+    assert captured["api_key"]          # sent, but any value will do
+    assert not captured["api_key"].startswith("sk-")
+
+
+def test_no_base_url_means_no_base_url_argument(monkeypatch):
+    captured: dict[str, Any] = {}
+
+    class FakeOpenAI:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+    monkeypatch.setitem(__import__("sys").modules, "openai",
+                        type("Mod", (), {"OpenAI": FakeOpenAI}))
+    openai_backend.client(Settings(openai_api_key="sk-oai"))
+
+    assert "base_url" not in captured
+    assert captured["api_key"] == "sk-oai"
+
+
+class PickyCompletions:
+    """A server that rejects json_schema, as some local ones do."""
+
+    def __init__(self, error: Exception) -> None:
+        self.error = error
+        self.calls: list[dict[str, Any]] = []
+
+    def create(self, **kwargs):
+        self.calls.append(kwargs)
+        if kwargs["response_format"]["type"] == "json_schema":
+            raise self.error
+        message = type("Message", (), {"content": json.dumps(VALID_PAYLOAD),
+                                       "refusal": None})
+        choice = type("Choice", (), {"message": message})
+        return type("Response", (), {"choices": [choice], "usage": None,
+                                     "model": kwargs["model"]})
+
+
+def test_a_server_that_cannot_do_json_schema_falls_back_to_plain_json(monkeypatch):
+    completions = PickyCompletions(
+        RuntimeError("response_format json_schema is not supported by this model"))
+    client_obj = type("Client", (), {"chat": type("Chat", (), {
+        "completions": completions})})
+    monkeypatch.setattr(openai_backend, "client", lambda config: client_obj)
+
+    config = Settings(openai_base_url="http://localhost:11434/v1",
+                      openai_model="llama3.1", ai_provider="openai")
+    report = insights.coach_report({"any": "briefing"}, config)
+
+    assert report.ok
+    assert [c["response_format"]["type"] for c in completions.calls] == [
+        "json_schema", "json_object"]
+    # The shape has to be asked for in words once the schema can't be enforced.
+    assert "conforming exactly to this schema" in completions.calls[1]["messages"][-1]["content"]
+
+
+def test_an_unrelated_failure_is_not_retried(monkeypatch):
+    """Retrying a rate limit or a bad key just doubles the failure."""
+    completions = PickyCompletions(RuntimeError("429 rate limit exceeded"))
+    client_obj = type("Client", (), {"chat": type("Chat", (), {
+        "completions": completions})})
+    monkeypatch.setattr(openai_backend, "client", lambda config: client_obj)
+
+    report = insights.coach_report(
+        {"any": "briefing"}, Settings(openai_api_key="sk-oai", ai_provider="openai"))
+
+    assert not report.ok
+    assert "rate limit" in report.error
+    assert len(completions.calls) == 1
